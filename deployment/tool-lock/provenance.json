@@ -1,0 +1,96 @@
+{
+  "date": "2026-11-04",
+  "scope": "发布资产身份与版本摘要固定；未下载、执行或完成这些工具的全源码安全审计。摘要来自官方 GitHub Release API，不能当作独立签名。",
+  "tools": [
+    {
+      "repository": "projectdiscovery/nuclei",
+      "metadata_url": "https://api.github.com/repos/projectdiscovery/nuclei/releases/latest",
+      "release_url": "https://github.com/projectdiscovery/nuclei/releases/tag/v3.11.1",
+      "release_id": 367195598,
+      "tag": "v3.11.1",
+      "target_commitish": "main",
+      "published_at": "2026-08-08T12:21:32Z",
+      "retrieved_at": "2026-11-04T10:30:46.339188+00:00",
+      "draft": false,
+      "prerelease": false,
+      "assets": [
+        {
+          "id": 506379676,
+          "name": "nuclei_3.11.1_linux_amd64.zip",
+          "size": 46148343,
+          "sha256": "sha256:ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6",
+          "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_amd64.zip"
+        },
+        {
+          "id": 506379678,
+          "name": "nuclei_3.11.1_linux_arm64.zip",
+          "size": 41431918,
+          "sha256": "sha256:8044e3d9768ba0a744b2872c1a87e813006f013da97ca9f50f7661a4203bec07",
+          "url": "https://github.com/projectdiscovery/nuclei/releases/download/v3.11.1/nuclei_3.11.1_linux_arm64.zip"
+        }
+      ],
+      "release_tag_commit": "a8c88feb4a1c8e961b7902534ce3af97e9d524a4",
+      "release_tag_commit_url": "https://github.com/projectdiscovery/nuclei/commit/a8c88feb4a1c8e961b7902534ce3af97e9d524a4"
+    },
+    {
+      "repository": "projectdiscovery/httpx",
+      "metadata_url": "https://api.github.com/repos/projectdiscovery/httpx/releases/latest",
+      "release_url": "https://github.com/projectdiscovery/httpx/releases/tag/v1.12.0",
+      "release_id": 384760174,
+      "tag": "v1.12.0",
+      "target_commitish": "main",
+      "published_at": "2026-09-08T13:36:33Z",
+      "retrieved_at": "2026-11-04T10:30:47.061623+00:00",
+      "draft": false,
+      "prerelease": false,
+      "assets": [
+        {
+          "id": 550577479,
+          "name": "httpx_1.12.0_linux_amd64.zip",
+          "size": 19200026,
+          "sha256": "sha256:9d8439e8b6c9aa7d1e2314817a392e00d5178da3af5652f7475f88868f418f76",
+          "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_linux_amd64.zip"
+        },
+        {
+          "id": 550577476,
+          "name": "httpx_1.12.0_linux_arm64.zip",
+          "size": 17927774,
+          "sha256": "sha256:fd7b123c1dfbc3d69f19f524e4eebcd6ec06b9a6cbd56813c76f11645197331e",
+          "url": "https://github.com/projectdiscovery/httpx/releases/download/v1.12.0/httpx_1.12.0_linux_arm64.zip"
+        }
+      ],
+      "release_tag_commit": "4b6a9a9d476f94a4f3a630f37051f5671ecfb1f8",
+      "release_tag_commit_url": "https://github.com/projectdiscovery/httpx/commit/4b6a9a9d476f94a4f3a630f37051f5671ecfb1f8"
+    },
+    {
+      "repository": "projectdiscovery/subfinder",
+      "metadata_url": "https://api.github.com/repos/projectdiscovery/subfinder/releases/latest",
+      "release_url": "https://github.com/projectdiscovery/subfinder/releases/tag/v2.17.0",
+      "release_id": 406526961,
+      "tag": "v2.17.0",
+      "target_commitish": "main",
+      "published_at": "2026-10-08T07:09:35Z",
+      "retrieved_at": "2026-11-04T10:30:47.661747+00:00",
+      "draft": false,
+      "prerelease": false,
+      "assets": [
+        {
+          "id": 621057185,
+          "name": "subfinder_2.17.0_linux_amd64.zip",
+          "size": 10308162,
+          "sha256": "sha256:a39c3e5c7a26ef3c430915c4d6cbf7716a00f26769a75e9405aba796142eba37",
+          "url": "https://github.com/projectdiscovery/subfinder/releases/download/v2.17.0/subfinder_2.17.0_linux_amd64.zip"
+        },
+        {
+          "id": 621057186,
+          "name": "subfinder_2.17.0_linux_arm64.zip",
+          "size": 9378288,
+          "sha256": "sha256:24913d49dddc1d3a5e99a4a7580da5be980959b9415b96f52c4f7f4124392190",
+          "url": "https://github.com/projectdiscovery/subfinder/releases/download/v2.17.0/subfinder_2.17.0_linux_arm64.zip"
+        }
+      ],
+      "release_tag_commit": "c97f25802892093060f0fc424bfc3f39e273693a",
+      "release_tag_commit_url": "https://github.com/projectdiscovery/subfinder/commit/c97f25802892093060f0fc424bfc3f39e273693a"
+    }
+  ]
+}

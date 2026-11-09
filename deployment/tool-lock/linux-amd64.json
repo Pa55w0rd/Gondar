@@ -1,0 +1,28 @@
+{
+  "format": 1,
+  "os": "linux",
+  "arch": "amd64",
+  "pins": [
+    {
+      "tool_id": "nuclei",
+      "kind": "github",
+      "repository": "projectdiscovery/nuclei",
+      "version": "v3.11.1",
+      "archive_sha256": "ea63d4ae232808cd7c6bc00d0142428e231fab59dae01042246097d195835ab6"
+    },
+    {
+      "tool_id": "httpx",
+      "kind": "github",
+      "repository": "projectdiscovery/httpx",
+      "version": "v1.12.0",
+      "archive_sha256": "9d8439e8b6c9aa7d1e2314817a392e00d5178da3af5652f7475f88868f418f76"
+    },
+    {
+      "tool_id": "subfinder",
+      "kind": "github",
+      "repository": "projectdiscovery/subfinder",
+      "version": "v2.17.0",
+      "archive_sha256": "a39c3e5c7a26ef3c430915c4d6cbf7716a00f26769a75e9405aba796142eba37"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# 运行镜像只消费预编译二进制和固定资源；开发源码、记录、备份与其它构建产物不进上下文。
+# Dockerfile 新增 COPY 时须同步此白名单。特别排除 .build-tmp/gondar_change/peers 的大备份。
+**
+!Dockerfile
+!.dockerignore
+!LICENSE
+!NOTICE.md
+!start.sh
+!dist/
+!dist/amd64/
+!dist/amd64/gondar
+!dist/amd64/gondar-hostd
+!dist/arm64/
+!dist/arm64/gondar
+!dist/arm64/gondar-hostd
+!deployment/
+!deployment/container-entrypoint.sh
+!skills/
+!skills/**
+!third_party/
+!third_party/go-mitmproxy/
+!third_party/go-mitmproxy/LICENSE
+!third_party/shadcn-tailwind/
+!third_party/shadcn-tailwind/LICENSE

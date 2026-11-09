@@ -1,0 +1,214 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # 创建 Release 需要
+  packages: write # 推送镜像到 GHCR 需要
+
+jobs:
+  # ① 前端静态导出（一次），产物给交叉编译各平台复用
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build:static
+        working-directory: web
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/out
+
+  # ② 五平台交叉编译（内嵌前端）+ 打 zip
+  binaries:
+    needs: frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify configured release public key
+        env:
+          RELEASE_PUBLIC_KEY: ${{ vars.GONDAR_RELEASE_PUBLIC_KEY }}
+        run: test "$RELEASE_PUBLIC_KEY" = "$(tr -d '[:space:]' < deployment/release-public-key.txt)"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: server/webui/dist
+      - name: Build and package with build.sh
+        env:
+          GONDAR_TARGET_OS: ${{ matrix.goos }}
+          GONDAR_TARGET_ARCH: ${{ matrix.goarch }}
+          GONDAR_BUILD_VERSION: ${{ github.ref_name }}
+          GONDAR_RELEASE_REPO: ${{ github.repository }}
+          GONDAR_RELEASE_PUBLIC_KEY: ${{ vars.GONDAR_RELEASE_PUBLIC_KEY }}
+          GONDAR_SKIP_FRONTEND: "1"
+          GONDAR_SKIP_NPM_CI: "1"
+          # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。
+          # Release 使用 Go linker 裁剪和 zip 压缩，优先保证可移植性。
+          GONDAR_COMPRESS: "0"
+          GONDAR_PACKAGE: "1"
+          GONDAR_PACKAGE_DIR: dist
+        run: |
+          ./build.sh --target "${GONDAR_TARGET_OS}/${GONDAR_TARGET_ARCH}"
+      - name: Smoke test Linux amd64 binary
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: dist/gondar-linux-amd64/gondar -h
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: "dist/*.zip"
+      # Linux 生二进制单独上传，供 docker job 复用（免在镜像里重编前端+Go）
+      - if: matrix.goos == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bin-linux-${{ matrix.goarch }}
+          path: |
+            dist/gondar-linux-${{ matrix.goarch }}/gondar
+            dist/gondar-linux-${{ matrix.goarch }}/gondar-hostd
+
+  # ③ 汇总所有 zip → 创建 GitHub Release
+  release:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      # 这个 job 只拿到 dist/ 产物，没有工作区；install.sh 要从仓库取，所以必须 checkout。
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pkg-*
+          merge-multiple: true
+          path: dist
+      - name: Stage deployment files
+        run: |
+          cp install.sh docker-compose.yml README.md dist/
+          cp .env.example dist/env.example
+          cp deployment/release-public-key.txt dist/
+      - name: Generate checksums
+        working-directory: dist
+        run: sha256sum *.zip install.sh docker-compose.yml README.md env.example release-public-key.txt > SHA256SUMS
+      - name: Sign checksums with configured release identity
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.GONDAR_RELEASE_SIGNING_KEY }}
+          RELEASE_PUBLIC_KEY: ${{ vars.GONDAR_RELEASE_PUBLIC_KEY }}
+        run: |
+          test -n "$RELEASE_SIGNING_KEY" && test -n "$RELEASE_PUBLIC_KEY" || { echo "必须配置自己的发行私钥和可信公钥，拒绝发布未签名发行包" >&2; exit 1; }
+          key_file="$(mktemp)"
+          trap 'rm -f "$key_file"' EXIT
+          chmod 600 "$key_file"
+          printf '%s' "$RELEASE_SIGNING_KEY" > "$key_file"
+          signer_public="$(openssl pkey -in "$key_file" -pubout -outform DER | tail -c 32 | base64 -w0)"
+          test "$signer_public" = "$RELEASE_PUBLIC_KEY" || { echo "发行私钥与配置公钥不匹配" >&2; exit 1; }
+          openssl pkeyutl -sign -rawin -inkey "$key_file" -in dist/SHA256SUMS -out dist/SHA256SUMS.sig.bin
+          test "$(wc -c < dist/SHA256SUMS.sig.bin)" -eq 64
+          base64 -w0 dist/SHA256SUMS.sig.bin > dist/SHA256SUMS.sig
+          rm -f dist/SHA256SUMS.sig.bin
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.zip
+            dist/SHA256SUMS
+            dist/SHA256SUMS.sig
+            dist/install.sh
+            dist/docker-compose.yml
+            dist/env.example
+            dist/README.md
+            dist/release-public-key.txt
+          generate_release_notes: true
+          draft: false
+
+  # ④ 多架构镜像（复用 binaries 编好的 Linux 二进制，镜像里只装工具 + 放二进制；
+  #    arm64 仅需模拟 apt 层，构建快很多）。
+  #    始终发布到当前仓库的 GHCR——用 Actions 内置 GITHUB_TOKEN，
+  #    无需配置任何 secrets；若另外配置了 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN
+  #    secrets，则同时推送到 <DockerHub用户名>/gondar，方便习惯 Docker Hub 的用户。
+  docker-cred-check:
+    runs-on: ubuntu-latest
+    outputs:
+      ok: ${{ steps.check.outputs.ok }}
+    steps:
+      - id: check
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::未配置 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN secrets，跳过 Docker Hub 镜像发布（GHCR 发布不受影响）"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  docker:
+    needs: [binaries, docker-cred-check, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5 # 取 Dockerfile 与 skills/
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-linux-amd64
+          path: dist/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: bin-linux-arm64
+          path: dist/arm64
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      # GHCR 登录：公开仓库内置 GITHUB_TOKEN 即可，无需任何配置
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Docker Hub 登录：仅在配置了 secrets 时执行
+      - uses: docker/login-action@v3
+        if: needs.docker-cred-check.outputs.ok == 'true'
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: 组装镜像名列表
+        id: images
+        env:
+          DOCKERHUB_OK: ${{ needs.docker-cred-check.outputs.ok }}
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+        run: |
+          imgs="ghcr.io/${GITHUB_REPOSITORY,,}"
+          if [ "$DOCKERHUB_OK" = "true" ] && [ -n "$DOCKERHUB_USERNAME" ]; then
+            imgs="$imgs,${DOCKERHUB_USERNAME}/gondar"
+          fi
+          echo "images=$imgs" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ${{ steps.images.outputs.images }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=ref,event=tag
+            type=raw,value=latest
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,17 @@
+{
+  "project": "shadcn/ui",
+  "package": "shadcn",
+  "version": "4.12.0",
+  "tag": "shadcn@4.12.0",
+  "commit": "8055a12f462788f008bf5d746c9c6a585f552b29",
+  "source_url": "https://raw.githubusercontent.com/shadcn-ui/ui/8055a12f462788f008bf5d746c9c6a585f552b29/packages/shadcn/src/tailwind.css",
+  "artifact_url": "https://registry.npmjs.org/shadcn/-/shadcn-4.12.0.tgz",
+  "artifact_integrity": "sha512-o781ieQziCnXH2FKsEqxp1fnbHdbgAPO9inTSPeZ59hQfsZXuMGp3ul8oFSV5KQS4nbUK9b+DrDE6C7OvfKKQQ==",
+  "upstream_css_sha256": "bc7d83425702955b4cb67cb14ede9d603f9d912376d57a2d81d661094d2a782a",
+  "body_marker": " */\n",
+  "license": "MIT",
+  "license_path": "../../../../third_party/shadcn-tailwind/LICENSE",
+  "license_source_url": "https://raw.githubusercontent.com/shadcn-ui/ui/8055a12f462788f008bf5d746c9c6a585f552b29/LICENSE.md",
+  "license_sha256": "1564074e13439397221ffd522e2e504d56561994a23d371aa5e3ad43e4f5423f",
+  "update_process": "固定新版本及完整提交，验证官方包SRI与源码CSS一致后替换完整正文，保留MIT许可，运行scripts/check-vendored-styles.mjs与正式静态构建；不执行或安装CLI。"
+}

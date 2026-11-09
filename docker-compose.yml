@@ -1,0 +1,54 @@
+name: gondar
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-gondar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-gondar}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gondar} -d ${POSTGRES_DB:-gondar}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  gondar:
+    # 默认拉取 Docker Hub 正式镜像；可通过 GONDAR_IMAGE 和 GONDAR_TAG 覆盖。
+    image: ${GONDAR_IMAGE:-pa55w0rd01/gondar}:${GONDAR_TAG:-0.1.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GONDAR_PG_DSN: postgres://${POSTGRES_USER:-gondar}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-gondar}?sslmode=disable
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GONDAR_LLM_PROVIDER: ${GONDAR_LLM_PROVIDER:-}
+      GONDAR_LLM_MODEL: ${GONDAR_LLM_MODEL:-}
+      GONDAR_LLM_BASE_URL: ${GONDAR_LLM_BASE_URL:-}
+      GONDAR_LLM_PROXY: ${GONDAR_LLM_PROXY:-}
+      GONDAR_INSTALLER_DISABLED: ${GONDAR_INSTALLER_DISABLED:-0}
+    ports:
+      - "127.0.0.1:8787:8787"
+      - "127.0.0.1:8788:8788"
+      # 回连端口映射(按需放开):容器内 MSF/listener 监听的端口要映射到宿主,
+      # agent 才能收到 reverse shell。示例(解除注释并按需改):
+      # - "4444-4450:4444-4450"
+    volumes:
+      # 把数据目录（含 jwt.key、SQLite 等）绑定到项目根目录的 data/，
+      # 方便在宿主机直接查看/备份，容器重建也不丢。
+      - ./data:/app/data
+      # 把项目根目录的 skills 挂进容器（覆盖镜像内置的 /app/skills）；
+      # 改 skill 无需重建镜像，容器读的就是宿主机这份。
+      - ./skills:/app/skills
+      # 仅持久化当前容器的受管工具，不共享宿主工具目录或Docker socket。
+      # APT包仍位于容器层，重建镜像/容器后需按需补装。
+      - tools:/opt/gondar-tools
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  tools:
