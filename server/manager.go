@@ -1499,6 +1499,22 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 		return err
 	}
 	defer tx.Rollback()
+	var wasPaused bool
+	var explorationID int64
+	if err := tx.QueryRow(`SELECT paused,exploration_id FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, n).Scan(&wasPaused, &explorationID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
+		}
+		return err
+	}
+	newPlannerCycle := wasPaused || isTerminalStatus(expectedStatus) || freshFollowup
+	var frozen bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_archives WHERE task_id=$1 AND state!='archive_failed')`, n).Scan(&frozen); err != nil {
+		return err
+	}
+	if frozen {
+		return pgdb.ErrTaskExtensionFrozen
+	}
 	err = tx.QueryRow(`UPDATE tasks
 	SET status=$2,
 	    completed_at=CASE
@@ -1534,8 +1550,15 @@ func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued b
 	if err != nil {
 		return err
 	}
-	if (isTerminalStatus(expectedStatus) || freshFollowup) && !isTerminalStatus(status) {
+	if newPlannerCycle && !isTerminalStatus(status) {
 		if _, err := tx.Exec(`UPDATE task_progress SET round_no=0,idle_rounds=0,updated_at=now() WHERE task_id=$1`, id); err != nil {
+			return err
+		}
+		// A human recovery starts a new bounded planning cycle. Keep the historical
+		// failures, but fence them off atomically before any new planner can run.
+		if _, err := tx.Exec(`INSERT INTO activity(exploration_id,worker,kind,summary,metadata)
+VALUES($1,'planner','text','人工继续：已重新开始规划保护计数',
+'{"planner_outcome":{"version":1,"round":0,"code":"human_resume"}}'::jsonb)`, explorationID); err != nil {
 			return err
 		}
 	}

@@ -4101,6 +4101,21 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
 	humanTurn.MainSeg = segPtr
 	s.engine.emitActivity(t, humanTurn)
+	if len(req.Attachments) == 0 && isTaskResumeCommand(req.Message) {
+		reply, err := s.resumeTaskFromChat(t)
+		if err != nil {
+			reply = err.Error()
+		}
+		metadata, _ := json.Marshal(map[string]any{"task_control": map[string]any{"action": "resume", "host_handled": true, "succeeded": err == nil}})
+		s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, IsError: err != nil, MainSeg: segPtr, Metadata: metadata})
+		s.finishTaskChat(t.ID, cancel)
+		if err != nil {
+			writeErr(w, 409, reply)
+			return
+		}
+		writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule", "task_status": s.resolvedTaskStatus(t)})
+		return
+	}
 	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
 		ma = s.agentsForTask(t).main

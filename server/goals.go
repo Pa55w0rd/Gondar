@@ -146,6 +146,9 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused, requireConti
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()
+	if (requirePaused || requireContinuous) && s.engine.inflightCount(t.ID) > 1 {
+		return false, fmt.Errorf("旧执行仍在收尾，请等待停止后继续")
+	}
 	if requireContinuous {
 		if lifecycle.CompletionMode != db.CompletionContinuous {
 			return false, fmt.Errorf("请先将完成策略设为持续挖掘")
@@ -224,6 +227,12 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused, requireConti
 		// The persisted terminal->running CAS won. Clear the matching old-run
 		// state before parking in FIFO or starting the human follow-up work.
 		s.engine.resetTerminalRevival(t.ID)
+		t.clearSettle()
+	} else if wasPaused {
+		// Ordinary resume preserves the task's absolute clock, while the human
+		// intervention grants a fresh planning cycle and failure streak.
+		s.engine.plannerRound.Delete(t.ID)
+		s.engine.settling.Delete(t.ID)
 		t.clearSettle()
 	}
 	if shouldQueue {
