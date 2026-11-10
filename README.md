@@ -4,9 +4,9 @@ Gondar 是从 **ARTEX 开源代码二次开发**而来的个人实验项目。�
 
 说直白一点：这是在原项目基础上，让 **Codex 参与“乱改一通”**后继续修修补补的分支。大量改动由 AI 辅助完成，没有经过充分人工审计和完整真实场景验证。**代码可能存在安全漏洞、逻辑错误和不兼容问题，使用有风险。** 能启动、测试通过或扫描出了结果，都不代表它安全可靠。
 
-公开发行版本重新从 **0.1** 开始编号，对应构建版本 `0.1.0`。这是版本命名调整，不是回滚代码或删除此前的修改。公开仓库以当前源码快照建立首次提交，之前的维护历史与标签保存在本地；首次提交的作者身份不改变上游代码的版权归属。
+本项目从 **0.1** 重新编号。这是版本命名调整，不是回滚代码或删除此前的修改。公开仓库以源码快照建立首次提交，之前的维护历史与标签保存在本地；首次提交的作者身份不改变上游代码的版权归属。
 
-当前待发布版本为 **0.2**（构建 `0.2.0`），汇总 0.1 之后的工具、规划和证据修复，新增持续挖掘、明确完成策略及保留成果继续任务，保留防空转、预算和故障保护。详见 [0.2 版本介绍](RELEASE_NOTES_0.2.md)，本地取舍与验证留在 `gondar_change/0.2`。此版本尚未发布到 GitHub Releases 或 Docker Hub，下面的公开部署命令仍使用已发布的 `0.1.0` 镜像。
+当前版本为 **0.2**（构建 `0.2.0`）：新增持续挖掘和保留成果继续，优化提示词及完成判定，修复工具安装与运行问题，保留防空转、预算和故障保护。详见 [0.2 更新说明](RELEASE_NOTES_0.2.md)。
 
 ## 来源与版权
 
@@ -31,7 +31,7 @@ Gondar 是从 **ARTEX 开源代码二次开发**而来的个人实验项目。�
 
 ## Docker 部署
 
-Docker Hub 镜像为 [pa55w0rd01/gondar](https://hub.docker.com/r/pa55w0rd01/gondar)，当前版本使用 `0.1.0` 标签，`latest` 指向最新发行版。当前 Docker Hub 镜像的平台为 `linux/amd64`。
+Docker Hub 镜像为 [pa55w0rd01/gondar](https://hub.docker.com/r/pa55w0rd01/gondar)，当前版本使用 `0.2.0` 标签，`latest` 指向最新发行版。实际平台与固定镜像摘要见 [Releases](https://github.com/Pa55w0rd/Gondar/releases/tag/v0.2.0)。
 
 ```bash
 git clone https://github.com/Pa55w0rd/Gondar.git
@@ -57,10 +57,10 @@ docker compose up -d
 bash ./install.sh --verify-only --version=latest -y
 
 # 二进制模式：安装程序、PostgreSQL和systemd服务，首次启动后在页面设置密码。
-sudo bash ./install.sh --mode=binary --version=v0.1.0 -y
+sudo bash ./install.sh --mode=binary --version=v0.2.0 -y
 
 # Docker模式：使用Releases部署说明中公布并核对过的完整镜像摘要。
-sudo bash ./install.sh --mode=docker --version=v0.1.0 \
+sudo bash ./install.sh --mode=docker --version=v0.2.0 \
   --image='pa55w0rd01/gondar@sha256:在此填入Releases公布的完整摘要' -y
 ```
 
@@ -83,7 +83,7 @@ Docker中使用应用内更新时，程序替换发生在当前容器可写层�
 ```bash
 git clone https://github.com/Pa55w0rd/Gondar.git
 cd Gondar
-GONDAR_BUILD_VERSION=0.1.0 GONDAR_OUTPUT=dist/amd64/gondar ./build.sh --target linux/amd64
+GONDAR_BUILD_VERSION=0.2.0 GONDAR_OUTPUT=dist/amd64/gondar ./build.sh --target linux/amd64
 docker build -t gondar:local .
 cp .env.example .env
 # 将 .env 的 GONDAR_IMAGE 改为 gondar、GONDAR_TAG 改为 local，并配置数据库密码：

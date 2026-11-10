@@ -132,7 +132,7 @@ jobs:
             dist/env.example
             dist/README.md
             dist/release-public-key.txt
-          generate_release_notes: true
+          body_path: RELEASE_NOTES_0.2.md
           draft: false
 
   # ④ 多架构镜像（复用 binaries 编好的 Linux 二进制，镜像里只装工具 + 放二进制；

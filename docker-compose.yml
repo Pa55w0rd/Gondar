@@ -18,7 +18,7 @@ services:
 
   gondar:
     # 默认拉取 Docker Hub 正式镜像；可通过 GONDAR_IMAGE 和 GONDAR_TAG 覆盖。
-    image: ${GONDAR_IMAGE:-pa55w0rd01/gondar}:${GONDAR_TAG:-0.1.0}
+    image: ${GONDAR_IMAGE:-pa55w0rd01/gondar}:${GONDAR_TAG:-0.2.0}
     depends_on:
       postgres:
         condition: service_healthy
