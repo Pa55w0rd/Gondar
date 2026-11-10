@@ -28,6 +28,8 @@ const (
 	KindGitHub Kind = "github" // GitHub Release 单文件
 	KindPip    Kind = "pip"    // pip / pipx
 	KindData   Kind = "data"   // fixed official repository snapshot; no executable scripts
+	KindSource Kind = "source" // fixed official Git commit, with a built-in installation recipe
+	KindGem    Kind = "gem"    // RubyGems package with a verified top-level gem digest
 	KindManual Kind = "manual" // 不提供一键安装
 )
 
@@ -121,9 +123,11 @@ type Tool struct {
 	Repo      string `json:"-"`
 	AssetTmpl string `json:"-"`
 	BinInZip  string `json:"-"`
+	RawScript bool   `json:"-"` // only explicit recipes may install a raw shell asset
 
 	// kind=pip
 	Pip string `json:"-"`
+	Gem string `json:"-"`
 
 	// PipLibrary 标记这个 pip 包是**纯库**（没有命令行入口）。
 	//
@@ -147,7 +151,7 @@ var catalog = []Tool{
 	{Name: "nmap", Purpose: "端口扫描/服务指纹", Kind: KindApt, Category: CatNetwork, Apt: "nmap", Dnf: "nmap"},
 	{Name: "masscan", Purpose: "大规模端口快扫", Kind: KindApt, Category: CatNetwork, Apt: "masscan", Dnf: "masscan"},
 	{Name: "sqlmap", Purpose: "SQL 注入检测与利用", Kind: KindApt, Category: CatWeb, Apt: "sqlmap", Dnf: "sqlmap"},
-	{Name: "imagemagick", Purpose: "证据图片处理：拼图/水印/脱敏（报告照片证据必需）", Kind: KindApt, Category: CatRuntime, Apt: "imagemagick", Dnf: "ImageMagick"},
+	{ID: "imagemagick", Name: "imagemagick", Bin: "magick", Aliases: []string{"convert"}, Purpose: "证据图片处理：拼图/水印/脱敏（报告照片证据必需）", Kind: KindApt, Category: CatRuntime, Apt: "imagemagick", Dnf: "ImageMagick"},
 	{Name: "libreoffice", Purpose: "文档证据预览：Word/Excel/PPT→PDF（附件缩略图与报告预览）", Kind: KindApt, Category: CatRuntime, Apt: "libreoffice-writer libreoffice-calc libreoffice-impress", Dnf: "libreoffice-writer libreoffice-calc libreoffice-impress"},
 	{Name: "poppler", Bin: "pdftoppm", Purpose: "PDF 转图片（文档证据预览必需）", Kind: KindApt, Category: CatRuntime, Apt: "poppler-utils", Dnf: "poppler-utils"},
 	{Name: "ffuf", Purpose: "目录/参数模糊枚举", Kind: KindApt, Category: CatWeb, Apt: "ffuf", Dnf: "ffuf"},
@@ -225,29 +229,30 @@ var catalog = []Tool{
 	{Name: "proxychains4", Bin: "proxychains4", Purpose: "任意 TCP 工具走 SOCKS 代理(隧道出口)", Kind: KindApt, Category: CatPivot,
 		Apt: "proxychains4", Dnf: "proxychains-ng"},
 	// evil-winrm：Windows 目标 WinRM 落地 shell（横向移动的标配落点）。
-	// GitHub release 只有源码（无二进制），Kali/Debian 走 apt 包。
-	{Name: "evil-winrm", Purpose: "WinRM 落地 shell(Windows 横向落地)", Kind: KindApt, Category: CatPivot,
-		Apt: "evil-winrm"},
+	// Debian stable does not ship Kali's package; use the official Ruby gem.
+	{Name: "evil-winrm", Purpose: "WinRM 落地 shell(Windows 横向落地)", Kind: KindGem, Category: CatPivot,
+		Gem: "evil-winrm"},
 	// ligolo-ng：TUN 式反向代理（比 SOCKS 更顺手的内网直达）。
 	// 资产名 2026-10-30 实测：ligolo-ng_proxy_<ver>_linux_amd64.tar.gz（官方
 	// 仓库是 nicocha30/ligolo-ng——猜 fork 名会 404）。
 	{Name: "ligolo-ng", Purpose: "TUN 反向代理(内网直达/双 bind)", Kind: KindGitHub, Category: CatPivot,
-		Repo: "nicocha30/ligolo-ng", AssetTmpl: "ligolo-ng_proxy_{ver}_linux_{arch}.tar.gz"},
+		Repo: "nicocha30/ligolo-ng", AssetTmpl: "ligolo-ng_proxy_{ver}_linux_{arch}.tar.gz", BinInZip: "proxy"},
 	// responder：LLMNR/NBT-NS 毒化（Windows 内网凭据捕获）。GitHub 无 release，
-	// Kali/Debian 有 apt 包（上游源码形态是目录，GitHub 配方装不了）。
-	{Name: "responder", Purpose: "LLMNR/NBT-NS 毒化(内网凭据捕获)", Kind: KindApt, Category: CatCred,
-		Apt: "responder"},
+	// Install the complete official source tree; Debian stable has no responder package.
+	{Name: "responder", Purpose: "LLMNR/NBT-NS 毒化(内网凭据捕获)", Kind: KindSource, Category: CatCred,
+		Repo: "lgandx/Responder"},
 	// tcpdump：内网抓包（流量取证/凭据嗅探的证据面）。
 	{Name: "tcpdump", Purpose: "网络抓包(流量取证)", Kind: KindApt, Category: CatNetwork,
 		Apt: "tcpdump", Dnf: "tcpdump"},
 	// pspy：无特权进程监视（发现 cron/服务类权限保持点）。资产名固定
 	// pspy64/pspy32（2026-10-30 实测，无版本号、repo 已归档=最后版本不变）。
-	{Name: "pspy", Bin: "pspy64", Purpose: "无特权进程监视(发现权限保持点)", Kind: KindGitHub, Category: CatExploit,
-		Repo: "DominicBreuker/pspy", AssetTmpl: "pspy64"},
-	// linpeas：Linux 提权枚举（后渗透第一脚本的行业标准）。资产实测
-	// linpeas_linux_amd64（无扩展名，arch 模板对齐）。
+	// Old release binaries have no publisher digest. Build the exact release commit instead.
+	{Name: "pspy", Bin: "pspy64", Purpose: "无特权进程监视(发现权限保持点)", Kind: KindSource, Category: CatExploit,
+		Repo: "DominicBreuker/pspy"},
+	// The official portable script preserves CLI arguments. The sh2bin ELF
+	// wrapper used by the current release does not handle -h correctly here.
 	{Name: "linpeas", Bin: "linpeas", Purpose: "Linux 提权枚举(PEASS 系列)", Kind: KindGitHub, Category: CatExploit,
-		Repo: "peass-ng/PEASS-ng", AssetTmpl: "linpeas_linux_{arch}"},
+		Repo: "peass-ng/PEASS-ng", AssetTmpl: "linpeas.sh", RawScript: true},
 	// sshuttle：SSH 翻越（把远端网段拉进本机路由表）。
 	{Name: "sshuttle", Purpose: "SSH 隧道直连远端网段(路由级 pivot)", Kind: KindApt, Category: CatPivot,
 		Apt: "sshuttle", Dnf: "sshuttle"},
@@ -336,6 +341,10 @@ func humanInstall(t Tool) string {
 		return "GitHub Release: https://github.com/" + t.Repo + "/releases"
 	case KindPip:
 		return "pip install " + t.Pip
+	case KindSource:
+		return "官方固定提交源码：https://github.com/" + t.Repo
+	case KindGem:
+		return "官方 RubyGems：https://rubygems.org/gems/" + t.Gem
 	}
 	if t.Install != "" {
 		return t.Install

@@ -370,19 +370,62 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, string(raw), id, s.expID)
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.
 func (s *ExplorationStore) UpdateGoalPayload(id int64, text, vulnclass string) error {
-	payload := map[string]any{"text": text}
-	if vulnclass != "" {
-		payload["vulnclass"] = vulnclass
-	}
-	raw, _ := json.Marshal(payload)
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET payload=$1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("目标不存在")
+	defer tx.Rollback()
+	if err := s.lockPlannerTask(tx); err != nil {
+		return err
 	}
-	return nil
+	var raw []byte
+	var state string
+	var version int
+	if err := tx.QueryRow(`SELECT payload,state,content_version FROM exploration_nodes WHERE id=$1 AND exploration_id=$2 AND kind='goal' FOR UPDATE`, id, s.expID).Scan(&raw, &state, &version); err != nil {
+		if err == sql.ErrNoRows {
+			return fmt.Errorf("目标不存在")
+		}
+		return err
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return err
+	}
+	oldClass, _ := payload["vulnclass"].(string)
+	if payload["text"] == text && oldClass == vulnclass {
+		return tx.Commit()
+	}
+	previous := make(map[string]any)
+	for key, value := range payload {
+		if key != "goal_history" {
+			previous[key] = value
+		}
+	}
+	previous["state"] = state
+	previous["content_version"] = version
+	previous["changed_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+	history, _ := payload["goal_history"].([]any)
+	if payload["goal_history"] != nil && history == nil {
+		return fmt.Errorf("目标历史格式异常，未覆盖原记录")
+	}
+	payload["goal_history"] = append(history, previous)
+	payload["text"] = text
+	delete(payload, "vulnclass")
+	if vulnclass != "" {
+		payload["vulnclass"] = vulnclass
+	}
+	for _, key := range []string{"unverified", "unverified_reason", "proof_reason", "proof_evidence_id"} {
+		delete(payload, key)
+	}
+	payload["goal_revision"] = version + 1
+	raw, err = json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET payload=$1,state='open',content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, string(raw), id, s.expID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteGoal hard-deletes a goal node; scoped to kind='goal' so it can never drop

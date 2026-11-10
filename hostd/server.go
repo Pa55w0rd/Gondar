@@ -206,7 +206,7 @@ func (s *Server) start(parent context.Context, toolID, proxy, resolutionID strin
 		}
 		installPin, source = &plan.Pin, plan.Source
 		aptPackages = plan.AptPackages
-	} else if tool.Kind == hosttools.KindGitHub || tool.Kind == hosttools.KindPip || tool.Kind == hosttools.KindData {
+	} else if tool.Kind == hosttools.KindGitHub || tool.Kind == hosttools.KindPip || tool.Kind == hosttools.KindData || tool.Kind == hosttools.KindSource || tool.Kind == hosttools.KindGem {
 		return nil, fmt.Errorf("请先检测官方版本，检测完成后即可安装")
 	}
 	if installPin != nil {
@@ -222,7 +222,7 @@ func (s *Server) start(parent context.Context, toolID, proxy, resolutionID strin
 			}
 			canUpdate = aptVersionNewer(current.Version, installPin.Version)
 		}
-		if tool.Kind == hosttools.KindData {
+		if tool.Kind == hosttools.KindData || (tool.Kind == hosttools.KindSource && tool.ID == "responder") {
 			canUpdate = current.Version != installPin.Version
 		}
 		if current.Available && (current.Version == "" || !canUpdate) {
@@ -297,6 +297,12 @@ func (s *Server) start(parent context.Context, toolID, proxy, resolutionID strin
 		}
 		j.setState(StateRunning)
 		code, err := s.run(ctx, j, tool, cleanProxy)
+		if err == nil {
+			hosttools.InvalidatePackageCache()
+		}
+		if err == nil && !tool.AvailableInPath() {
+			code, err = 1, fmt.Errorf("安装进程已结束，但未找到 %s 的可用入口，请检查安装日志及 PATH", tool.Name)
+		}
 		j.mu.Lock()
 		j.ExitCode = code
 		j.EndedAt = time.Now()
@@ -376,14 +382,23 @@ func (s *Server) run(ctx context.Context, j *Job, tool hosttools.Tool, proxy str
 		return s.runPip(ctx, j, tool, proxy)
 	case hosttools.KindData:
 		return s.runData(ctx, j, tool, proxy)
+	case hosttools.KindSource:
+		return s.runSource(ctx, j, tool, proxy)
+	case hosttools.KindGem:
+		return s.runGem(ctx, j, tool, proxy)
 	}
 	return 1, fmt.Errorf("不支持的安装方式: %s", tool.Kind)
 }
 
 // execLogged 执行一条命令,输出实时追加到任务日志。
 func (s *Server) execLogged(ctx context.Context, j *Job, name string, argv []string, env []string) (int, error) {
+	return s.execLoggedInDir(ctx, j, "", name, argv, env)
+}
+
+func (s *Server) execLoggedInDir(ctx context.Context, j *Job, dir, name string, argv []string, env []string) (int, error) {
 	j.append(fmt.Sprintf("$ %s %s\n", name, strings.Join(argv, " ")))
 	cmd := exec.CommandContext(ctx, name, argv...)
+	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	w := &logWriter{j: j}
 	cmd.Stdout, cmd.Stderr = w, w
@@ -472,7 +487,7 @@ func (s *Server) runGitHub(ctx context.Context, j *Job, tool hosttools.Tool, pro
 	if err := verifyToolArchive(blob, *j.installPin); err != nil {
 		return 1, err
 	}
-	j.append(fmt.Sprintf("[*] 已下载 %.1f MB,解压…\n", float64(len(blob))/(1<<20)))
+	j.append(fmt.Sprintf("[*] 已下载 %.1f MB，检查安装内容…\n", float64(len(blob))/(1<<20)))
 
 	// 归档格式各家不一：ProjectDiscovery 系是 .zip，gitleaks/chisel/amass 是
 	// .tar.gz 或 .gz，feroxbuster 是 .tar.gz。按内容嗅探决定走哪条解压路径，
@@ -486,6 +501,12 @@ func installFromArchive(j *Job, blob []byte, tool hosttools.Tool) (int, error) {
 	want := tool.BinInZip
 	if want == "" {
 		want = tool.Bin
+	}
+	if tool.RawScript {
+		if err := validateRawScript(blob); err != nil {
+			return 1, err
+		}
+		return installBinary(j, tool, blob)
 	}
 	// zip: PK\x03\x04
 	if len(blob) > 4 && blob[0] == 'P' && blob[1] == 'K' {
@@ -579,6 +600,9 @@ func installBinary(j *Job, tool hosttools.Tool, data []byte) (int, error) {
 	}
 	if err := os.Rename(tmp, dst); err != nil {
 		os.Remove(tmp)
+		return 1, err
+	}
+	if err := saveInstalledRecord(j, tool, data); err != nil {
 		return 1, err
 	}
 	j.append(fmt.Sprintf("[ok] %s → %s\n", want, dst))

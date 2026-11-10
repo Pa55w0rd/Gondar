@@ -308,6 +308,7 @@ export const api = {
     sourceTaskIds?: string[];
     companyIds?: number[];
     timeoutSeconds?: number;
+	completionMode?: "objective" | "continuous";
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
@@ -323,6 +324,7 @@ export const api = {
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
+	  completion_mode: input.completionMode ?? "objective",
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
@@ -332,6 +334,9 @@ export const api = {
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
+	updateTaskExecution: (id: string, input: { completion_mode?: "objective" | "continuous"; timeout_seconds?: number }) =>
+	  patch<Task>(`/tasks/${encodeURIComponent(id)}/execution`, input),
+	continueTask: (id: string) => post<{ id: string; queued: boolean; status: string }>(`/tasks/${encodeURIComponent(id)}/continue`),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
   createTaskCategory: (name: string) => post<TaskCategory>("/task-categories", { name }),

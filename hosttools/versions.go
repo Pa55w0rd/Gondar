@@ -128,10 +128,19 @@ func ProbeInstalled(ctx context.Context, tool Tool) Installed {
 		return Installed{}
 	}
 	current := Installed{Available: true}
+	if version, ok := installedRecordVersion(tool, bin); ok {
+		current.Version = version
+		return current
+	}
+	// Enumerators must never be run merely to detect a version. An unknown
+	// version is preferable to accidentally starting enumeration or a listener.
+	if tool.ID == "linpeas" || tool.ID == "pspy64" || tool.ID == "responder" {
+		return current
+	}
 	flags := map[string][]string{
 		"nc": {"-h"}, "ssh": {"-V"}, "openssl": {"version"}, "dig": {"-v"}, "imagemagick": {"-version"}, "poppler": {"-v"},
 		"nuclei": {"-version"}, "httpx": {"-version"}, "subfinder": {"-version"}, "naabu": {"-version"}, "dnsx": {"-version"}, "katana": {"-version"}, "tlsx": {"-version"},
-		"ffuf": {"-V"}, "gobuster": {"version"}, "feroxbuster": {"--version"}, "chisel": {"--version"}, "dalfox": {"version"}, "masscan": {"--version"},
+		"ffuf": {"-V"}, "gobuster": {"version"}, "feroxbuster": {"--version"}, "chisel": {"--version"}, "dalfox": {"--version"}, "masscan": {"--version"}, "evil-winrm": {"-V"},
 	}
 	args := flags[tool.ID]
 	if len(args) == 0 {

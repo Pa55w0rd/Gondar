@@ -230,8 +230,14 @@ func inspectDisk(filename string) Disk {
 
 func inspectTool(ctx context.Context, tool hosttools.Tool, hash, probe bool) Tool {
 	r := Tool{ID: tool.ID, VersionSource: "未执行本地工具"}
-	filename, err := exec.LookPath(tool.Bin)
-	if err != nil {
+	filename := ""
+	for _, bin := range append([]string{tool.Bin}, tool.Aliases...) {
+		if found, err := exec.LookPath(bin); err == nil {
+			filename = found
+			break
+		}
+	}
+	if filename == "" {
 		return r
 	}
 	r.Available, r.Path = true, filename

@@ -55,7 +55,7 @@ func (t *ToolSet) updateResource() actool.CoreTool {
 }
 
 func (t *ToolSet) listResources() actool.CoreTool {
-	return readTool("list_resources", "分页读取本任务资源摘要（默认20项）；resource_id可读取单项清理计划。期限到达需重新核验，登记不是漏洞、代码执行或目标达成证明。", obj(map[string]any{"resource_id": intp("可选：读取单项完整台账"), "offset": intp("可选：分页偏移"), "limit": intp("可选：分页数量，默认20，最多50")}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+	return readTool("list_resources", "分页读取本任务资源摘要（默认20项）；resource_id仅接受资源台账ID，不是意图/fact/finding/工具活动ID。不知道资源ID时省略该字段先读清单。期限到达需重新核验，登记不是漏洞、代码执行或目标达成证明。", obj(map[string]any{"resource_id": intp("可选：register_resource或本工具返回的资源台账ID；不是其他节点ID。查询清单时省略"), "offset": intp("可选：分页偏移"), "limit": intp("可选：分页数量，默认20，最多50")}), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		if t.ts == nil || t.taskID <= 0 {
 			return actool.Errorf("资源查询需要任务上下文"), nil
 		}
@@ -76,7 +76,7 @@ func (t *ToolSet) listResources() actool.CoreTool {
 					return jsonResult(item)
 				}
 			}
-			return actool.Errorf("资源不存在"), nil
+			return actool.Errorf("当前任务中没有这个资源台账ID；请省略resource_id先获取清单，不要把意图、fact、finding或工具活动ID当作资源ID"), nil
 		}
 		if a.Offset < 0 {
 			a.Offset = 0

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -128,6 +129,10 @@ func (s *Server) Versions(ctx context.Context, id, proxy string) (ToolVersion, e
 		pin, err = resolvePyPI(ctx, client, tool, &info)
 	case hosttools.KindData:
 		pin, err = s.resolveData(ctx, tool, &info, cleanProxy)
+	case hosttools.KindSource:
+		pin, err = s.resolveSource(ctx, client, tool, &info, cleanProxy)
+	case hosttools.KindGem:
+		pin, err = resolveGem(ctx, client, tool, &info)
 	case hosttools.KindApt:
 		info.Source = "已配置系统软件源"
 		if s.pkgMgr == PkgApt {
@@ -154,9 +159,17 @@ func (s *Server) Versions(ctx context.Context, id, proxy string) (ToolVersion, e
 	}
 	if err != nil {
 		if ctx.Err() != nil {
-			return ToolVersion{}, ctx.Err()
+			if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return ToolVersion{}, ctx.Err()
+			}
+			// Slow remote metadata must not erase an already observed local
+			// installation, or leave a partial latest version/action behind.
+			info.LatestVersion, info.SHA256 = "", ""
+			pin = nil
+			info.Reason = "官方版本查询超时；已保留本地可用状态和当前版本，请稍后重新检测"
+		} else {
+			info.Reason = err.Error()
 		}
-		info.Reason = err.Error()
 	}
 	finishVersionStatus(&info)
 	state.mu.Lock()
@@ -187,7 +200,11 @@ func (s *Server) Versions(ctx context.Context, id, proxy string) (ToolVersion, e
 			}
 		}
 	}
-	state.cache[id] = versionCacheEntry{info: info, until: now.Add(versionCacheTTL), proxy: cleanProxy}
+	cacheTTL := versionCacheTTL
+	if err != nil {
+		cacheTTL = 15 * time.Second
+	}
+	state.cache[id] = versionCacheEntry{info: info, until: now.Add(cacheTTL), proxy: cleanProxy}
 	return info, nil
 }
 
@@ -215,7 +232,7 @@ func officialRedirect(req *http.Request, via []*http.Request) error {
 		return fmt.Errorf("拒绝不安全的官方源重定向")
 	}
 	switch req.URL.Hostname() {
-	case "github.com", "api.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org":
+	case "github.com", "api.github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com", "pypi.org", "files.pythonhosted.org", "rubygems.org":
 		return nil
 	}
 	return fmt.Errorf("重定向离开固定官方源")

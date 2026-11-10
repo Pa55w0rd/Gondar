@@ -48,6 +48,15 @@ func githubReleaseFallback(ctx context.Context, client *http.Client, tool hostto
 	}
 	info.LatestVersion = tag
 	asset := path.Base(GitHubAssetURL(tool, tag))
+	// New GitHub assets expose their publisher digest on the official expanded
+	// asset page even when the REST API quota is exhausted.
+	expanded := "https://github.com/" + tool.Repo + "/releases/expanded_assets/" + url.PathEscape(tag)
+	if data, pageErr := metadata(ctx, client, expanded, 2<<20); pageErr == nil {
+		if digest, digestErr := expandedAssetDigest(data, "/"+tool.Repo+"/releases/download/"+tag+"/"+asset); digestErr == nil {
+			info.SHA256 = digest
+			return &hosttools.InstallPin{ToolID: tool.ID, Kind: tool.Kind, Repository: tool.Repo, Version: tag, SHA256: digest}, nil
+		}
+	}
 	version := strings.TrimPrefix(tag, "v")
 	name := path.Base(tool.Repo)
 	for _, file := range []string{name + "-checksums.txt", name + "_" + version + "_checksums.txt", name + "_checksums.txt", "checksums.txt", "SHA256SUMS"} {

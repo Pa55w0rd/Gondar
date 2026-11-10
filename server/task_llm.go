@@ -569,7 +569,7 @@ func isRetryableStreamError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, agent.ErrModelCallTimeout) {
+	if errors.Is(err, agent.ErrModelCallTimeout) || errors.Is(err, agent.ErrTaskBudgetExpired) {
 		return false
 	}
 	if isQuotaExhaustedError(err) {
@@ -723,6 +723,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 		}
 	}
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl.SetRunTimeout(time.Duration(s.agentRunSeconds("planner")) * time.Second)
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetArtifactRecorder(s)
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)

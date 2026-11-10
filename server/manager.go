@@ -61,6 +61,7 @@ type Task struct {
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
 	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	CompletionMode       string                 `json:"completion_mode"`
 	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
@@ -124,20 +125,22 @@ func (t *Task) hasPendingFreshDirection() bool {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	Name          string
-	PinnedAt      int64
-	Status        string
-	Paused        bool
-	Queued        bool
-	QueuedAt      int64
-	QueueMode     string
-	CompletedAt   int64
-	FirstRunAt    int64
-	DeadlineAt    int64
-	SourceTaskIDs []int64
-	CompanyIDs    []int64
-	CategoryID    *int64
-	CategoryName  string
+	CompletionMode string
+	TimeoutSeconds int
+	Name           string
+	PinnedAt       int64
+	Status         string
+	Paused         bool
+	Queued         bool
+	QueuedAt       int64
+	QueueMode      string
+	CompletedAt    int64
+	FirstRunAt     int64
+	DeadlineAt     int64
+	SourceTaskIDs  []int64
+	CompanyIDs     []int64
+	CategoryID     *int64
+	CategoryName   string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -151,6 +154,7 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
+		CompletionMode: t.CompletionMode, TimeoutSeconds: t.TimeoutSeconds,
 		Name:          t.Name,
 		PinnedAt:      t.PinnedAt,
 		Status:        t.Status,
@@ -175,6 +179,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.lifecycleMu.Lock()
 	state := t.lifecycleSnapshotLocked()
 	update(&state)
+	t.CompletionMode = state.CompletionMode
+	t.TimeoutSeconds = state.TimeoutSeconds
 	t.Name = state.Name
 	t.PinnedAt = state.PinnedAt
 	t.Status = state.Status
@@ -1163,6 +1169,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
 		CoverageEnabled: pt.CoverageEnabled,
+		CompletionMode:  pt.CompletionMode,
 		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
@@ -1467,6 +1474,10 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 // admission keeps its FIFO timestamp; a task that was explicitly paused and is
 // now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	return m.applyTaskAdmission(id, expectedStatus, status, queued, mode, preservePosition, false)
+}
+
+func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition, freshFollowup bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1483,7 +1494,12 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 
 	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
 	var committedMode string
-	err = m.pg.QueryRow(`UPDATE tasks
+	tx, err := m.pg.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRow(`UPDATE tasks
 	SET status=$2,
 	    completed_at=CASE
 	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
@@ -1502,20 +1518,28 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        ELSE 'resume'
 	    END,
 	    first_run_at=CASE
-	        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        WHEN ($6 IN ('done','failed','timeout') OR $7) AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE first_run_at
 	    END,
 	    deadline_at=CASE
-	        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        WHEN ($6 IN ('done','failed','timeout') OR $7) AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE deadline_at
 	    END
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
-	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus).
+	RETURNING queued_at, queue_mode, completed_at, first_run_at, deadline_at`, n, status, queued, mode, preservePosition, expectedStatus, freshFollowup).
 		Scan(&queuedAt, &committedMode, &completedAt, &firstRunAt, &deadlineAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
 	}
 	if err != nil {
+		return err
+	}
+	if (isTerminalStatus(expectedStatus) || freshFollowup) && !isTerminalStatus(status) {
+		if _, err := tx.Exec(`UPDATE task_progress SET round_no=0,idle_rounds=0,updated_at=now() WHERE task_id=$1`, id); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 
@@ -1672,7 +1696,7 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 	m.mu.RLock()
 	timeout := 0
 	if t := m.tasks[id]; t != nil {
-		timeout = t.TimeoutSeconds
+		timeout = t.lifecycleSnapshot().TimeoutSeconds
 	}
 	m.mu.RUnlock()
 	dl, err := m.pg.StampFirstRun(n, timeout)

@@ -22,6 +22,12 @@ func TestPlannerStateRevisionAndArchiveRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
+	if err := d.EnsureLLMRecordsTable(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
 	task, err := d.CreateTask("planner durable handoff", "synthetic", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)

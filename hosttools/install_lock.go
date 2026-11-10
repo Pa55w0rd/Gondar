@@ -19,6 +19,7 @@ type InstallPin struct {
 	Package    string `json:"package,omitempty"`
 	Version    string `json:"version"`
 	SHA256     string `json:"archive_sha256,omitempty"`
+	Commit     string `json:"source_commit,omitempty"`
 }
 
 type InstallLock struct {

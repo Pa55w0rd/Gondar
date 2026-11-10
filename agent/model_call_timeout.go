@@ -15,6 +15,10 @@ const defaultModelCallTimeout = 10 * time.Minute
 // worker after a partial response may already have dispatched tools.
 var ErrModelCallTimeout = fmt.Errorf("model_call_timeout: %w", context.DeadlineExceeded)
 
+// A task budget expiring is an expected transition to settlement, not evidence
+// that the model backend failed. Keep it distinct from the logical call limit.
+var ErrTaskBudgetExpired = fmt.Errorf("task_deadline_reached：任务总时限已到，进入收尾: %w", context.DeadlineExceeded)
+
 type ModelCallTimeoutError struct{ Limit, Elapsed time.Duration }
 
 func (e *ModelCallTimeoutError) Error() string {
@@ -49,12 +53,14 @@ func modelCallContext(parent context.Context, limit time.Duration) (context.Cont
 		limit = run
 	}
 	deadline := time.Now().Add(limit)
+	cause := ErrModelCallTimeout
 	clock := taskClockFrom(parent)
 	// Final settlement has its own live parent deadline. Reusing the already
 	// expired task-clock value would prevent the engine's explicit final round.
 	if clock.DeadlineUnix > 0 && !clock.Final {
 		if taskEnd := time.Unix(clock.DeadlineUnix, 0); taskEnd.Before(deadline) {
 			deadline = taskEnd
+			cause = ErrTaskBudgetExpired
 		}
 	}
 	if parentEnd, ok := parent.Deadline(); ok && !parentEnd.After(deadline) {
@@ -67,7 +73,7 @@ func modelCallContext(parent context.Context, limit time.Duration) (context.Cont
 	if actual < 0 {
 		actual = 0
 	}
-	ctx, cancel := context.WithDeadlineCause(parent, deadline, ErrModelCallTimeout)
+	ctx, cancel := context.WithDeadlineCause(parent, deadline, cause)
 	return ctx, cancel, actual
 }
 
@@ -80,6 +86,9 @@ func modelCallError(parent, call context.Context, err error, limit time.Duration
 	}
 	if call.Err() != nil && context.Cause(call) == ErrModelCallTimeout {
 		return &ModelCallTimeoutError{Limit: limit, Elapsed: time.Since(start)}
+	}
+	if call.Err() != nil && context.Cause(call) == ErrTaskBudgetExpired {
+		return ErrTaskBudgetExpired
 	}
 	return err
 }

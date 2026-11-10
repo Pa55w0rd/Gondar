@@ -1444,13 +1444,13 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 }
 
 func (t *ToolSet) proveGoal() actool.CoreTool {
-	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
+	return t.writeExpTool("prove_goal", "用与当前目标定义一致的真实证据标记单项目标met并保存证明关系。持续挖掘模式下这不会结束整个任务；目标达成模式才在全部目标证明后完成。不得用一条发现或受限清单证明整个测试范围已穷尽。",
 		obj(map[string]any{
 			"goal_id":     idp("目标节点 id"),
 			"evidence_id": idp("证明它的发现/事实节点 id"),
 			"reason":      str("为什么这个证据满足该目标"),
 		}, "goal_id", "evidence_id"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				GoalID     json.RawMessage `json:"goal_id"`
 				EvidenceID json.RawMessage `json:"evidence_id"`
@@ -1469,21 +1469,22 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
+			mode, err := t.completionMode(ctx)
+			if err != nil {
+				return actool.Errorf("读取完成策略失败：" + err.Error()), nil
+			}
+			if err := t.ts.ProveGoal(goal, ev, goalNode.Payload, a.Reason); err != nil {
+				return actool.Errorf("目标证明未保存：" + err.Error()), nil
+			}
+			if mode == db.CompletionContinuous {
+				return actool.Text(fmt.Sprintf("goal %d marked met；已保存单项目标证明，持续挖掘任务保持运行。继续处理未验证方向；无法推进则如实说明阻塞，由宿主保护暂停。", goal)), nil
+			}
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
 			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
-			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
-				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
-						break
-					}
-				}
-				if allMet {
+			if total, unmet, err := t.ts.GoalCompletionCounts(ctx); err == nil && total > 0 {
+				if unmet == 0 {
 					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
+					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", total, goal)
 					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
 				}
 			}
@@ -1492,30 +1493,35 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 }
 
 func (t *ToolSet) goalMet() actool.CoreTool {
-	return writeTool("goal_met", "【立即结束整个任务】——仅当你确认任务的【全部目标都已真正达成、整体收官】时才调（注意是任务【整体】完成；仅仅达成了其中某一个目标/某一个 flag/某一个漏洞【不算】——那种情况用 prove_goal 标记该目标即可）。⚠️它不是用来“结束本轮规划”的：本轮没有新意图要派、或在等 worker 产出，都【直接结束本轮即可，不要调本工具】（0 个意图是完全正常的）。正常判定优先用 prove_goal 逐个证明目标；goal_met 只是绕过逐个证明、直接从全局收官的手段。",
+	return t.writeExpTool("goal_met", "核对目标达成型任务的全部目标已经通过 prove_goal 标记 met 后结束任务；不能绕过逐项证明，不能用于结束当前规划轮。持续挖掘模式禁止本工具结束任务。无新方向、缺账号、没有漏洞或等待worker时应如实说明阻塞，不声明整体完成。",
 		obj(map[string]any{"reason": str("达成理由（必须是目标真正达成的证据，不能是“本轮无新方向”这类结束本轮的理由）")}, "reason"),
-		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
+			mode, err := t.completionMode(ctx)
+			if err != nil {
+				return actool.Errorf("读取完成策略失败：" + err.Error()), nil
+			}
+			if mode == db.CompletionContinuous {
+				return actool.Errorf("持续挖掘任务不能通过 goal_met 结束；保留已有成果并派发真实未验证方向，无可执行方向则说明阻塞，由宿主防空转保护暂停。"), nil
+			}
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
+			total, unmet, err := t.ts.GoalCompletionCounts(ctx)
+			if err != nil {
+				return actool.Errorf("核对目标失败：" + err.Error()), nil
+			}
+			if total == 0 || unmet > 0 {
+				return actool.Errorf("还有未证明目标或没有可核对目标，不能声明整个任务完成；请先核对当前目标并用真实证据 prove_goal。"), nil
+			}
+			active, err := t.ts.HasActiveIntent()
+			if err != nil {
+				return actool.Errorf("核对运行中方向失败：" + err.Error()), nil
+			}
+			if active {
+				return actool.Errorf("仍有待执行或运行中的意图，不能把结束本轮当作整个任务完成。"), nil
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
-			// 可审计：goal_met 是「整体声称达成」，没有走 prove_goal 的逐条证据链。
-			// 把仍未 met 的目标打上未验证标记，报告与界面才能区分「被证明」和「被声称」，
-			// 而不是让一次偷懒的收官看起来和验证过的达成一样。
-			// t.ts 为 nil 时（无任务上下文的 ToolSet，如工具目录构造期）跳过：那条路径
-			// 本来就调不到这里，但 nil 解引用会直接把进程带走，不值得赌。
-			unproven := 0
-			if t.ts != nil {
-				if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil {
-					for _, g := range goals {
-						if g.State != "met" {
-							unproven++
-							_ = t.ts.MarkGoalUnverified(g.ID, a.Reason)
-						}
-					}
-				}
-			}
-			return actool.Text(fmt.Sprintf("acknowledged: task marked complete（%d 个目标未经逐条证据证明，已留痕）", unproven)), nil
+			return actool.Text(fmt.Sprintf("acknowledged: %d 个目标已逐项证明且没有待执行方向，目标达成型任务可完成", total)), nil
 		})
 }
 
@@ -2566,8 +2572,7 @@ func (t *ToolSet) stallOverview() map[string]any {
 	out["open_intents_now"] = openCnt
 	// 提示位:零新产出 + 无 open → 建议收官
 	if recentNew == 0 && openCnt == 0 {
-		out["hint"] = "最近 6 小时无新 fact/finding 且无 open 意图——边际收益可能已耗尽。若目标确已尽力," +
-			"用 goal_met 收官(reason 写明边际收益耗尽的诚实小结);仍有未测方向就继续派意图。"
+		out["hint"] = "宿主观察窗口内无新增事实/漏洞且没有open意图。请核对仍在运行的方向与未验证缺口；只用实际态势说明阻塞，不编造停滞时长、不用goal_met替代结束本轮。由宿主完成策略与有限保护决定是否暂停或结束。"
 	}
 	return out
 }

@@ -193,7 +193,7 @@ func (e *Engine) maybePendingSettle(ctx context.Context, t *Task) bool {
 	if isTerminalStatus(t.lifecycleSnapshot().Status) {
 		return false
 	}
-	if reason != "auto_rounds" {
+	if reason != "auto_rounds" && reason != "goal_met" {
 		active, err := t.Store.HasActiveIntent()
 		if err != nil || active {
 			return false

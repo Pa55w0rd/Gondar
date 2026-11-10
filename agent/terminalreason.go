@@ -32,9 +32,9 @@ func (t *runTrace) done(id string) {
 
 var reasonHint = map[harness.TerminalReason]string{
 	harness.ReasonCompleted:         "模型正常结束了本轮，但没有留下文字总结；事实和资产以本轮工具调用记录为准",
-	harness.ReasonMaxTurns:          "达到步数上限(MaxTurns)：SDK 已执行收尾并写回事实和资产，意图会标记为 exhausted，供规划者换方向继续，而不是作为失败处理",
-	harness.ReasonTimeout:           "达到单次运行的墙钟预算(MaxDuration)：到点会打断在跑的工具并就地进收尾，把已识别的事实和资产写回，意图会标记为 exhausted",
-	harness.ReasonModelError:        "模型或 API 调用失败（网络、鉴权、限流、供应商 5xx 等），重试用尽后意图标记为 blocked——传输层故障导致这条意图基本没真正探成；查其执行过程（get_worker_trace）后再决定重派或换法",
+	harness.ReasonMaxTurns:          "达到步数上限(MaxTurns)：本轮收尾已结束；事实、资产和附件是否保存以实际工具回执为准，不能仅凭预算终态认定已写回",
+	harness.ReasonTimeout:           "运行或任务的时间预算已到：停止本轮，保存情况以实际工具回执为准；这不等于模型服务故障或目标已经完成",
+	harness.ReasonModelError:        "模型响应或 API 调用失败，可能是响应流提前断开、网络、鉴权、限流或供应商错误。此前工具可能已执行、成果可能已保存；请按实际回执及执行记录核对，不把本轮错误当作从未执行或目标已经完成",
 	harness.ReasonBlockingLimit:     "上下文长度达到硬上限，请求在发出前被拦截；应收窄意图粒度或压缩工具返回",
 	harness.ReasonPromptTooLong:     "提示词过长且上下文压缩重试已经用尽，无法继续执行",
 	harness.ReasonImageError:        "当前模型不支持本轮多模态内容；请切换支持视觉的模型或避免工具返回图片",
@@ -70,7 +70,7 @@ func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (st
 		}
 		sum = "（运行被中断：" + short + "；停在" + stage + progressSuffix(term, tr) + "，未完成）"
 	} else if reason == harness.ReasonMaxTurns || reason == harness.ReasonTimeout {
-		sum = "（达到运行预算上限(" + string(reason) + ")，已收尾写回事实" + progressSuffix(term, tr) + "；本次无文字总结）"
+		sum = "（达到运行预算上限(" + string(reason) + ")，实际保存情况以工具回执为准" + progressSuffix(term, tr) + "；本次无文字总结）"
 	} else {
 		hint := terminalReasonHint(reason)
 		sum = "（无文字总结，终态 " + terminalReasonLabel(reason) + "：" + firstLine(hint, 80) + "）"

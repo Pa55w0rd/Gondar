@@ -395,6 +395,8 @@ func TestResolvedInstallJobDoesNotFollowLaterLatest(t *testing.T) {
 	}
 	t.Setenv("PATH", "")
 	s := newVersionTestServer(t)
+	// The daemon's install directory is part of the application PATH in a real deployment.
+	t.Setenv("PATH", s.InstallDir)
 	tool, _ := hosttools.Lookup("nuclei")
 	var blob bytes.Buffer
 	zw := zip.NewWriter(&blob)

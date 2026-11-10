@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -54,6 +55,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	var failures toolFailureLoop
 	var reads plannerReadLoop
 	watchReads := RunInfoFrom(ctx).Kind == KindPlanner
+	failures.planner = watchReads
 	var loopErr error
 
 	var tbuf strings.Builder
@@ -91,6 +93,12 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			if loopErr != nil {
 				rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: loopErr.Error(), Detail: loopErr.Error()}, lastUsage))
 				return finalText, reason, loopErr
+			}
+			if errors.Is(err, ErrTaskBudgetExpired) {
+				reason = harness.ReasonTimeout
+				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: err}, lastTool)
+				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
+				return finalText, reason, err
 			}
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
@@ -158,6 +166,12 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 		case harness.KindResult:
 			if ev.Terminal != nil {
+				budgetExpired := errors.Is(ev.Terminal.Err, ErrTaskBudgetExpired)
+				if budgetExpired {
+					terminal := *ev.Terminal
+					terminal.Reason = harness.ReasonTimeout
+					ev.Terminal = &terminal
+				}
 				if ev.Terminal.Reason != harness.ReasonAbortedStreaming {
 					sidequestion.Finish(ctx, ev.Terminal.Messages)
 				}
@@ -178,7 +192,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				if loopErr != nil {
 					sum, detail = loopErr.Error(), loopErr.Error()
 				}
-				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil || loopErr != nil,
+				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil && !budgetExpired || loopErr != nil,
 					Summary: firstLine(sum, 400), Detail: detail,
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
 					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})

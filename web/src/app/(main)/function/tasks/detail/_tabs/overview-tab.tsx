@@ -31,6 +31,7 @@ import { ArtifactAssociationHints } from "@/components/artifact-association-hint
 import { DailyScheduleCard } from "@/components/daily-schedule-card";
 import { TaskLessonsCard } from "@/components/task-lessons-card";
 import { TaskResourcesCard } from "@/components/task-resources-card";
+import { TaskExecutionCard } from "@/components/task-execution-card";
 import { Button } from "@/components/ui/button";
 import { ZoomableImageDialog } from "@/components/zoomable-image-dialog";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -468,6 +469,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       </Card>
       {/* 任务级登录凭据（v0.4.8）：摘要 + 一次真实登录自检；未配置时不渲染。 */}
       <TaskAuthCard taskId={taskId} />
+	  <TaskExecutionCard task={task} onChange={setTask} />
       {/* 证据附件（v0.4.9）：截图缩略图 + 数据样本/日志列表 + 证据包下载。 */}
       <TaskArtifactsCard key={`artifacts-${taskId}`} taskId={taskId} />
       <DailyScheduleCard key={`daily-${taskId}`} taskId={taskId} />

@@ -220,6 +220,9 @@ function FindingDetailInner() {
                   {finding.report && <CopyButton text={finding.report} successMessage="已复制详细报告" />}
                 </CardHeader>
                 <CardContent>
+                  <p className="mb-3 text-muted-foreground text-xs">
+                    当前证据版本：{finding.evidence_version ?? "未登记"}；报告依据版本：{finding.report_evidence_version == null || finding.report_evidence_version < 0 ? "未绑定" : finding.report_evidence_version}
+                  </p>
                   {finding.report_stale ? (
                     <Alert>
                       <AlertDescription>流量证据已变更，详细报告待更新。</AlertDescription>

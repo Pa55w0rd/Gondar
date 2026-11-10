@@ -115,17 +115,17 @@ func (s *Server) runningTaskCount(excludeID string) int {
 // work. It atomically either starts the task or appends it to the persistent FIFO
 // queue. mode is bootstrap for a freshly-created task and resume otherwise.
 func (s *Server) admitTask(t *Task, mode string) (queued bool, err error) {
-	return s.admitTaskWhen(t, mode, false)
+	return s.admitTaskWhen(t, mode, false, false)
 }
 
 // admitPausedTask is the task-control resume path. The paused precondition is
 // checked under the same scheduler lock as admission so a concurrent pause,
 // dequeue or FIFO promotion cannot leave database and Engine state divergent.
 func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
-	return s.admitTaskWhen(t, "resume", true)
+	return s.admitTaskWhen(t, "resume", true, false)
 }
 
-func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused, requireContinuous bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
@@ -146,6 +146,17 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()
+	if requireContinuous {
+		if lifecycle.CompletionMode != db.CompletionContinuous {
+			return false, fmt.Errorf("请先将完成策略设为持续挖掘")
+		}
+		if !lifecycle.Paused && !isTerminalStatus(lifecycle.Status) {
+			return false, fmt.Errorf("任务已在运行或排队，无需重复继续")
+		}
+		if s.engine.inflightCount(t.ID) > 1 {
+			return false, fmt.Errorf("旧执行仍在收尾，请等待停止后继续")
+		}
+	}
 	if requirePaused {
 		if isTerminalStatus(lifecycle.Status) {
 			return false, fmt.Errorf("终态任务不能执行继续")
@@ -202,18 +213,14 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	status := lifecycle.Status
 	if wasTerminal {
 		status = "running"
-		// 终态复活是一次新的探索：清掉旧收尾计数，避免第一轮就被 idle 判据收掉。
-		if err := s.m.pg.ResetTaskProgress(t.ID); err != nil {
-			log.Printf("[auto-finish] task %s 复活时重置进度失败: %v", t.ID, err)
-		}
 	}
-	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+	if err := s.m.applyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued, requireContinuous); err != nil {
 		if !engineWasPaused && !wasPaused && !wasQueued {
 			s.engine.Resume(t)
 		}
 		return false, err
 	}
-	if wasTerminal && status == "running" {
+	if (wasTerminal && status == "running") || requireContinuous {
 		// The persisted terminal->running CAS won. Clear the matching old-run
 		// state before parking in FIFO or starting the human follow-up work.
 		s.engine.resetTerminalRevival(t.ID)

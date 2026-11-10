@@ -26,6 +26,7 @@ func Causef(code, short, format string, args ...any) *AbortCause {
 }
 
 var (
+	AbortContinuousPause = cause("continuous_pause", "持续挖掘保护已暂停任务", "持续任务触发无进展或轮数预算保护，已暂停并保留成果。它不表示目标已经测完；检查阻塞后可人工继续。")
 	// Task-level execution context.
 	AbortPausedByUser = cause("paused_by_user", "用户暂停了任务",
 		"用户通过任务控制接口（POST /api/tasks/{id}/control，action=pause）暂停了任务。本次 Planner/Worker 运行被主动取消；运行中的意图会退回 frontier(open)，恢复任务后重新领取并从头执行")
@@ -65,6 +66,8 @@ var (
 		"后端进程收到 SIGINT 或 SIGTERM，正在重启、更新或关闭。所有运行中的 Agent 会被取消；重启后残留的 running 意图会重置为 open 并重新执行")
 	AbortRunHardTimeout = cause("run_hard_timeout", "单次运行的硬超时兜底已触发",
 		"单次运行超过软墙钟预算及额外宽限，说明模型请求或某个工具长时间没有返回，导致正常的回合边界收尾无法执行。请重点检查中断前最后一个未返回的工具调用")
+	AbortPlannerFailure = cause("planner_failure", "规划连续故障保护已停止任务",
+		"连续三轮规划出现模型、空转、工具或超时故障。任务已停止，既有目标、意图、证据与规划交接保留；修复阻塞后可人工恢复")
 )
 
 // AbortReason resolves the named cause attached to a cancelled run context.

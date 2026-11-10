@@ -50,6 +50,9 @@ func TestBuiltinTaskScenesHTTPListProtectionAndCopy(t *testing.T) {
 			continue
 		}
 		count++
+		if row.BuiltinKey == "source_audit" {
+			t.Fatal("retired source-audit template remains available")
+		}
 		if row.Scene == nil || row.Scene.TimeoutSeconds <= 0 {
 			t.Fatalf("missing real defaults: %+v", row)
 		}
@@ -57,7 +60,7 @@ func TestBuiltinTaskScenesHTTPListProtectionAndCopy(t *testing.T) {
 			ctf = row
 		}
 	}
-	if count != 8 || ctf.ID == 0 || !ctf.Scene.SeedFirstIntent || ctf.Scene.CoverageEnabled {
+	if count != 7 || ctf.ID == 0 || !ctf.Scene.SeedFirstIntent || ctf.Scene.CoverageEnabled {
 		t.Fatalf("scene defaults incorrect: count=%d CTF=%+v", count, ctf)
 	}
 	for _, method := range []string{"PATCH", "DELETE"} {

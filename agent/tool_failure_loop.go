@@ -28,6 +28,9 @@ type toolFailureLoop struct {
 	streak  int
 	schema  int
 	recent  [][32]byte
+	planner bool
+	errors  int
+	byTool  map[string]map[[32]byte]int
 }
 
 func (g *toolFailureLoop) start(id, name string, input []byte) {
@@ -48,6 +51,24 @@ func (g *toolFailureLoop) start(id, name string, input []byte) {
 func (g *toolFailureLoop) result(id string, failed bool, output string) error {
 	call, known := g.pending[id]
 	delete(g.pending, id)
+	if g.planner && known {
+		if !failed {
+			delete(g.byTool, call.name)
+		} else {
+			g.errors++
+			if g.byTool == nil {
+				g.byTool = map[string]map[[32]byte]int{}
+			}
+			if g.byTool[call.name] == nil {
+				g.byTool[call.name] = map[[32]byte]int{}
+			}
+			key := sha256.Sum256([]byte(strings.TrimSpace(output)))
+			g.byTool[call.name][key]++
+			if g.byTool[call.name][key] >= 3 || g.errors >= 8 {
+				return fmt.Errorf("%w：规划工具%s同类错误重复%d次，本轮累计%d次工具错误；修改参数或插入无关成功调用不能代替修复错误，请核对真实工具契约后继续", ErrToolFailureLoop, call.name, g.byTool[call.name][key], g.errors)
+			}
+		}
+	}
 	if !failed || !known {
 		g.streak = 0
 		g.schema = 0

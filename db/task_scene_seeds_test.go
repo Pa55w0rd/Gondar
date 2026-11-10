@@ -7,7 +7,7 @@ import (
 )
 
 func TestBuiltinTaskSceneCatalog(t *testing.T) {
-	if len(builtinTaskScenes) != 8 {
+	if len(builtinTaskScenes) != 7 {
 		t.Fatalf("scene count=%d", len(builtinTaskScenes))
 	}
 	keys := map[string]bool{}
@@ -16,6 +16,9 @@ func TestBuiltinTaskSceneCatalog(t *testing.T) {
 			t.Fatalf("duplicate key %s", scene.key)
 		}
 		keys[scene.key] = true
+		if scene.key == "source_audit" {
+			t.Fatal("retired source-audit scene was reintroduced")
+		}
 		if !strings.Contains(scene.description, "{{target}}") || !strings.Contains(scene.goal, "{{target}}") {
 			t.Fatalf("scene %s has no target slot", scene.key)
 		}
@@ -50,7 +53,7 @@ func TestBuiltinTaskSceneUpgradeIdempotentAndUserSafe(t *testing.T) {
 				out[row.BuiltinKey] = row
 			}
 		}
-		if len(out) != 8 {
+		if len(out) != 7 {
 			t.Fatalf("builtin count=%d", len(out))
 		}
 		return out
@@ -84,7 +87,10 @@ func TestBuiltinTaskSceneUpgradeIdempotentAndUserSafe(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = d.DeleteTaskTemplate(custom.ID) }()
-	if _, err := d.Exec(`UPDATE task_templates SET description='older builtin revision' WHERE builtin_key='source_audit'`); err != nil {
+	if _, err := d.Exec(`INSERT INTO task_templates(name,nkey,description,goal,intercept_rules,builtin_key) VALUES('源码审计','builtin:source_audit','retired builtin','retired goal','[]','source_audit')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE task_templates SET description='older builtin revision' WHERE builtin_key='finding_retest'`); err != nil {
 		t.Fatal(err)
 	}
 	d2, err := Open(dsn)
@@ -96,7 +102,7 @@ func TestBuiltinTaskSceneUpgradeIdempotentAndUserSafe(t *testing.T) {
 	if after["ctf"].ID == initial["ctf"].ID || !after["ctf"].Scene.SeedFirstIntent {
 		t.Fatal("missing CTF scene was not reseeded")
 	}
-	if after["single_web"].ID != initial["single_web"].ID || after["source_audit"].Description == "older builtin revision" {
+	if after["single_web"].ID != initial["single_web"].ID || after["finding_retest"].Description == "older builtin revision" || after["source_audit"] != nil {
 		t.Fatal("upgrade did not preserve identity/update managed prompt")
 	}
 	user, err := d2.GetTaskTemplate(custom.ID)

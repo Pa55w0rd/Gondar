@@ -107,6 +107,7 @@ func (e *Engine) resetTerminalRevival(taskID string) {
 	e.deadline.Delete(taskID)
 	e.stamped.Delete(taskID)
 	e.coordStarted.Delete(taskID)
+	e.plannerRound.Delete(taskID)
 }
 
 // stampFirstRun records the FIRST real run (LLM ready), once per process. Tasks
@@ -144,7 +145,7 @@ func (e *Engine) clockCtx(base context.Context, t *Task, final bool, reason stri
 // Called from Run() and from the restart reload path, so non-active timeout tasks
 // still get settled after their deadline even without live planner/worker loops.
 func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
-	if t == nil || t.TimeoutSeconds <= 0 {
+	if t == nil || t.lifecycleSnapshot().TimeoutSeconds <= 0 {
 		return
 	}
 	e.deleteMu.RLock()
@@ -152,19 +153,26 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 		e.deleteMu.RUnlock()
 		return
 	}
-	if _, loaded := e.coordStarted.LoadOrStore(t.ID, true); loaded {
+	generation := make(chan struct{})
+	if _, loaded := e.coordStarted.LoadOrStore(t.ID, generation); loaded {
 		e.deleteMu.RUnlock()
 		return
 	}
 	rt := e.registerTaskRoutines(ctx, t.ID, 1)
 	e.deleteMu.RUnlock()
-	runTaskRoutine(rt, func(loopCtx context.Context) { e.deadlineCoordinator(loopCtx, t) })
+	runTaskRoutine(rt, func(loopCtx context.Context) {
+		defer e.coordStarted.CompareAndDelete(t.ID, generation)
+		e.deadlineCoordinator(loopCtx, t, generation)
+	})
 }
 
 // deadlineCoordinator waits until the task's absolute deadline, then runs the settle
 // sequence. Absolute wall-clock: it keeps counting through pauses.
-func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
+func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task, generation chan struct{}) {
 	for {
+		if current, ok := e.coordStarted.Load(t.ID); !ok || current != generation {
+			return
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -172,6 +180,12 @@ func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 		}
 		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
 			return // already finished (goals met / failed) — nothing to time out
+		}
+		if e.IsPaused(t.ID) {
+			if sleepCtx(ctx, deadlinePollInterval) {
+				return
+			}
+			continue
 		}
 		dl := e.taskDeadline(t)
 		if dl <= 0 {
@@ -190,6 +204,9 @@ func (e *Engine) deadlineCoordinator(ctx context.Context, t *Task) {
 			}
 			continue
 		}
+		if current, ok := e.coordStarted.Load(t.ID); !ok || current != generation {
+			return
+		}
 		e.settleTask(ctx, t)
 		return
 	}
@@ -205,6 +222,14 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 //   - goal_met     planner 明确判定目标达成且无在跑意图（不再跑终局轮，直接 done）
 //   - auto_idle / auto_coverage / auto_rounds 程序化自动收尾（终态 done）
 func (e *Engine) settleTaskWithReason(ctx context.Context, t *Task, reason, detail string) {
+	if t.lifecycleSnapshot().CompletionMode == db.CompletionContinuous && reason != "timeout" {
+		if reason == "goal_met" {
+			t.clearSettle()
+			return
+		}
+		e.pauseContinuousRun(t, reason, detail)
+		return
+	}
 	if !e.markSettling(t.ID, reason) {
 		return
 	}
@@ -308,7 +333,8 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task, reason strin
 	// settleTask 在等这一步落终态——Plan 若卡死（上游半开连接/compactor 自死锁，
 	// 两类都是线上发生过的事故），任务会永远停在 settling。超时=按「未达成」
 	// 返回，走正常的超时收尾流程；卡死的 goroutine 泄漏是两害取其轻。
-	roundCtx, roundCancel := context.WithTimeout(fctx, plannerRoundLimit())
+	roundLimit := min(plannerRoundLimit(), planner.FinalRoundLimit())
+	roundCtx, roundCancel := context.WithTimeout(fctx, roundLimit)
 	defer roundCancel()
 	res := runPlannerRound(roundCtx, func(pctx context.Context) (bool, string, error) {
 		return planner.Plan(pctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)

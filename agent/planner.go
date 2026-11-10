@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -15,6 +18,19 @@ import (
 	"gondar/db"
 	"gondar/intercept"
 )
+
+const plannerRunDuration = 5 * time.Minute
+const plannerSettlementGrace = time.Minute
+const plannerFinalRunDuration = 2 * time.Minute
+
+var ErrPlannerModelError = errors.New("planner_model_error")
+
+func plannerTurnBudget(configured int) int {
+	if configured > 0 {
+		return configured
+	}
+	return 24
+}
 
 // Planner is the event-driven LLM planner (docs §4.3): each time the asset or
 // exploration graph changes (debounced), it reads the exploration route, queries
@@ -28,7 +44,8 @@ type Planner struct {
 	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
 	window            int                                    // context window in tokens (for compaction)
 	windowFn          func() int                             // optional dynamic task-chain minimum
-	maxTurns          int                                    // max agent turns per run (0 = unlimited)
+	maxTurns          int                                    // configured max turns; nonpositive uses 24
+	runTimeout        time.Duration                          // configured main budget; capped at five minutes
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
 	attributions      func() map[string]any                  // Guard 归因读取（nil = 概览不带 guard_attributions 块）
@@ -49,6 +66,28 @@ func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, 
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
+
+func (p *Planner) SetRunTimeout(d time.Duration) { p.runTimeout = d }
+
+func (p *Planner) runDuration() time.Duration {
+	if p.runTimeout > 0 && p.runTimeout < plannerRunDuration {
+		return p.runTimeout
+	}
+	return plannerRunDuration
+}
+
+// RoundLimit includes a bounded grace period for persisting already known work.
+func (p *Planner) RoundLimit() time.Duration { return p.runDuration() + plannerSettlementGrace }
+
+func (p *Planner) finalRunDuration() time.Duration {
+	if configured := p.runDuration(); configured < plannerFinalRunDuration {
+		return configured
+	}
+	return plannerFinalRunDuration
+}
+func (p *Planner) FinalRoundLimit() time.Duration {
+	return p.finalRunDuration() + plannerSettlementGrace
+}
 
 // SetCompactor wires the cold-node compactor (cold-digest §7). Called each
 // planner wake-up to advance the round counter, maintain cold stamps, and
@@ -314,11 +353,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
    - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
-   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（DSL 搜索、type 过滤、分页，或 id/ids 直取；找「已登记但还没测」的资产用 list_untested_assets 更省事）、asset_neighbors。资产全局共享，别默认拉全量。
+   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（DSL 搜索、type 过滤、分页，或 id/ids 直取；找「已登记但还没测」的资产用 list_untested_assets 更省事）。资产全局共享，别默认拉全量。
 
-2. **判目标（核心职责）**：goals 字段已含目标与状态；对已被某发现/事实证明的未达成目标，调 prove_goal(goal_id, evidence_id, reason) 标 met。**当你标记的恰是最后一个未完成目标时，系统自动判定整个任务完成**——收官只由逐个 prove_goal 驱动，没有别的"一键完成"手段。
+2. **核对目标与完成策略**：goals 字段已含目标及状态；对已有真实证据的单项交付可用 prove_goal 标 met。整个任务能否结束由宿主 completion_mode 决定：持续挖掘模式保留单项目标证明并继续处理未验证方向；目标达成模式才会在全部目标证明后完成。已有发现数量、零漏洞清单、缺账号或主要接口401不能替代范围和覆盖核验。
    - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
-   - **边际收益收官(目标模糊型任务)**：态势里 stall.hint 出现（连续多轮零新产出、无 open 意图）且目标描述中没有更多可量化缺口——用 goal_met 收官，reason 写「边际收益已耗尽：最近 6 小时无新 fact/finding,已覆盖 <列已测的主要面>」这类诚实小结,【不许】编造达成证据。收官比无产出空转更负责——空转每轮都在烧 token。
+   - **无进展与阻塞**：只引用宿主实际提供的时间、产出和在跑状态，不编造停滞时长。仍有可执行、未重复、范围内的方向时继续提交少量意图；无可执行方向时如实列出阻塞，由宿主有限保护暂停/停止。结束当前规划轮直接输出小结，不调用 goal_met；不能为减少token把未完成任务声称为已完成。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
    - 图里已有 worker 产出的 fact（facts>0 / recent_facts 非空）→【禁止】再自己探测，一切判断基于已有 fact，本轮产物只能是"派新意图"或"结束"；想深挖某线索 → 派意图让 worker 去查，不是自己 curl。
@@ -383,6 +422,17 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if err := ctx.Err(); err != nil {
 		return false, "", err
 	}
+	tc := taskClockFrom(ctx)
+	roundLimit := p.RoundLimit()
+	if tc.Final {
+		roundLimit = p.FinalRoundLimit()
+	}
+	ctx, cancel := context.WithTimeoutCause(ctx, roundLimit, AbortRunHardTimeout)
+	defer cancel()
+	mode, err := ts.TaskCompletionMode(ctx)
+	if err != nil {
+		return false, "", fmt.Errorf("读取任务完成策略失败：%w", err)
+	}
 	state, err := ts.BeginPlannerRound()
 	if err != nil {
 		return false, "", fmt.Errorf("载入规划交接失败: %w", err)
@@ -424,7 +474,6 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
-	tc := taskClockFrom(ctx)
 	if tc.Final {
 		words := resolveTaskTimeoutWrapup("planner")
 		if tc.FinalReason != "" && tc.FinalReason != "timeout" {
@@ -435,16 +484,22 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	sysBody := plannerSystem(goal, p.workDir, taskDir) + completionGuidance(mode)
+	if tc.Final {
+		sysBody += "\n【本轮是有限收尾】当前不是探索阶段；只读取已有材料、保存事实/证据和交接，不派发新意图、不请求目标。持续模式也遵守此阶段边界。"
+	}
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
-	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, p.runDuration())
+	if tc.Final {
+		// The task clock has intentionally expired. Terminal assessment gets a
+		// fresh bounded budget, still subject to the live caller's deadline.
+		maxDur, clamped = p.finalRunDuration(), false
+	}
 	settle := wrapupSettlement("planner", nil)
-	if tc.DeadlineUnix > 0 {
+	if tc.DeadlineUnix > 0 && !tc.Final {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
 	}
 	opts := agentcore.Options{
@@ -471,8 +526,8 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
-		MaxTurns:              p.maxTurns, // 0 = unlimited (configurable in agent management)
-		MaxDuration:           maxDur,     // 0=不限;有 deadline 时=距 deadline 剩余
+		MaxTurns:              plannerTurnBudget(p.maxTurns),
+		MaxDuration:           maxDur,
 		Compaction:            compactionConfig(p.compactionWindow()),
 		// TodoWrite is registered above with a durable, revision-fenced wrapper.
 		// 命中【本轮】步数预算→ SDK 跑收尾:把本轮已想清楚的结论落地(该派的 add_intent、
@@ -484,6 +539,20 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 工具调用可观测：planner 的工具调用此前完全不可观测（journal 里只有心跳），
 		// 无法从日志判断「planner 在干活」还是「planner 卡住不动」。纯旁路，不干预。
 		Hooks: toolLogSink(KindPlanner),
+	}
+	var progress *plannerProgressGuard
+	if tc.Final {
+		opts.Hooks = &plannerCheckpointHooks{inner: opts.Hooks}
+	}
+	if !tc.Final {
+		before, progressErr := ts.PlannerProgress(ctx)
+		if progressErr != nil {
+			return false, "", progressErr
+		}
+		if (before.OpenGoals > 0 || mode == db.CompletionContinuous) && before.ActiveIntents == 0 {
+			progress = &plannerProgressGuard{inner: opts.Hooks, store: ts, before: before, goalMet: func() bool { return tsx.GoalMet }, continuous: mode == db.CompletionContinuous}
+			opts.Hooks = progress
+		}
 	}
 	if p.tx != nil { // persist raw LLM conversation; one accumulating file per task's planner
 		opts.Transcript = p.tx
@@ -509,17 +578,29 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 整段重复每轮多烧 ~200 token 且两处措辞会日久漂移（体检 B8）。
 	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。硬底线提醒见 system 顶部：目标未达成且 frontier_open=0 且无 running 意图时，本轮必须产出意图。" +
 		renderPlannerHandoff(state) + renderPlannerTodos(todos.List())
+	input += "\n\n【宿主规划预算与回执】主探索最多5分钟，较短的运行配置优先；未配置轮数时最多24轮，随后仅有有限收尾。TodoWrite、生成脚本和文字总结是草稿，不等于已经派发。目标未完成且没有待执行/运行中意图时，必须通过真实 add_intent 等操作提交可执行进展；无法推进应说明阻塞，不得声称已派发。"
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
-	lastSummary := state.Summary
+	previousSummary := state.Summary
+	lastSummary := previousSummary
 	persist := func(outcome string) {
 		if saveErr := savePlannerHandoff(ts, &state, todos, lastSummary, outcome); saveErr != nil {
 			log.Printf("[planner] exp %d 交接未保存: %v", ts.ID(), saveErr)
 		}
 	}
 	var finalText string
-	finalText, _, err = captureRun(ctx, opts, input,
+	var terminalReason harness.TerminalReason
+	var progressErr error
+	finalText, terminalReason, err = captureRun(ctx, opts, input,
 		func(r db.Activity) {
+			if progress != nil && r.Kind == "result" && !r.IsError && ctx.Err() == nil {
+				if validationErr := progress.validate(ctx); validationErr != nil {
+					progressErr = validationErr
+					r.IsError = true
+					r.Summary = "规划未落地：纠偏后仍没有实际动作"
+					r.Detail = validationErr.Error() + "\n\n模型原输出（未作为成功回执）：\n" + r.Detail
+				}
+			}
 			if r.Kind == "text" {
 				lastSummary, state.Summary = r.Detail, r.Detail
 			}
@@ -528,10 +609,20 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
+	if err == nil {
+		err = progressErr
+	} else if terminalReason == harness.ReasonModelError && ctx.Err() == nil {
+		err = errors.Join(ErrPlannerModelError, err)
+	}
 	// captureRun deliberately folds the final text into its terminal result
 	// instead of emitting a duplicate text activity.
 	if err == nil && strings.TrimSpace(finalText) != "" {
 		lastSummary = finalText
+	}
+	if err != nil && progress != nil && ctx.Err() == nil {
+		if check := progress.validate(ctx); errors.Is(check, ErrPlannerNoProgress) {
+			lastSummary = previousSummary
+		}
 	}
 	outcome := "completed"
 	if err != nil {

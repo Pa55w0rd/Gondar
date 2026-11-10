@@ -5,18 +5,26 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 )
 
-// Retry a transient transport/5xx failure once against the SAME fixed URL.
-// Digest failures are checked by the caller and never enter this retry path.
+// Retry transient failures at the fixed URL. GitHub's download query offers a
+// final retry for a stale/intermittently failing release redirect, preserving
+// the exact repository, tag and asset. The caller still verifies the pinned hash.
+// Digest failures never enter this retry path.
 func fetchToolArchive(ctx context.Context, client *http.Client, address string) ([]byte, error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		blob, retry, err := fetchToolArchiveOnce(ctx, client, address)
+	addresses := []string{address, address}
+	if alternate := githubDownloadRetryURL(address); alternate != "" {
+		addresses = append(addresses, alternate)
+	}
+	for attempt, target := range addresses {
+		blob, retry, err := fetchToolArchiveOnce(ctx, client, target)
 		if err == nil {
 			return blob, nil
 		}
-		if !retry || attempt == 1 || ctx.Err() != nil {
+		if !retry || attempt == len(addresses)-1 || ctx.Err() != nil {
 			return nil, err
 		}
 		select {
@@ -26,6 +34,19 @@ func fetchToolArchive(ctx context.Context, client *http.Client, address string) 
 		}
 	}
 	return nil, fmt.Errorf("工具归档下载失败")
+}
+
+func githubDownloadRetryURL(address string) string {
+	u, err := url.Parse(address)
+	if err != nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return ""
+	}
+	parts := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(parts) != 6 || parts[0] == "" || parts[1] == "" || parts[2] != "releases" || parts[3] != "download" || !exactVersion.MatchString(parts[4]) || parts[5] == "" {
+		return ""
+	}
+	u.RawQuery = "download=1"
+	return u.String()
 }
 
 func fetchToolArchiveOnce(ctx context.Context, client *http.Client, address string) ([]byte, bool, error) {

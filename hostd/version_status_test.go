@@ -90,6 +90,11 @@ func TestGitHubRateLimitFallbackStillRequiresExactChecksum(t *testing.T) {
 					return resp, nil
 				}
 				if !strings.Contains(r.URL.Path, "/releases/download/v2.3.4/") {
+					if r.URL.Path == "/"+tool.Repo+"/releases/expanded_assets/v2.3.4" {
+						resp := fakeResponse("")
+						resp.StatusCode = 404
+						return resp, nil
+					}
 					t.Fatalf("source drift: %s", r.URL)
 				}
 				if !strings.HasSuffix(r.URL.Path, "/naabu-checksums.txt") {

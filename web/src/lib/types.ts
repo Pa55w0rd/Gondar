@@ -5,6 +5,8 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+	completion_mode?: "objective" | "continuous";
+	timeout_seconds?: number;
   id: string;
   name?: string; // 可选任务名称;空/缺省=未命名,展示时回退到描述
   category_id?: number;
@@ -65,6 +67,7 @@ export interface TaskTemplate {
 }
 
 export interface TaskScenePreset {
+	completion_mode?: "objective" | "continuous";
   input_label: string;
   input_placeholder: string;
   input_kind: "text" | "host" | "domains" | "ips";
@@ -1777,7 +1780,7 @@ export interface HostTool {
   installable: boolean;
   purpose: string;
   install?: string;
-  kind: "apt" | "github" | "pip" | "data" | "manual";
+  kind: "apt" | "github" | "pip" | "data" | "source" | "gem" | "manual";
   /** 攻击面分类，页面按它分组。 */
   category: "network" | "dns" | "web" | "cred" | "code" | "pivot" | "oob" | "exploit" | "material" | "runtime" | "middleware" | "";
 }

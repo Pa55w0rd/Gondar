@@ -10,12 +10,31 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"gondar/hosttools"
 	"gondar/selfupdate"
 )
+
+func TestDoctorRecognizesImageMagickAliasWithoutExecution(t *testing.T) {
+	dir := t.TempDir()
+	name := "convert"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	filename := filepath.Join(dir, name)
+	if err := os.WriteFile(filename, []byte("synthetic, deliberately not executable content"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	tool, _ := hosttools.Lookup("imagemagick")
+	got := inspectTool(t.Context(), tool, false, false)
+	if !got.Available || got.Path != filename || got.VersionSource != "未执行本地工具" {
+		t.Fatalf("alias missing from diagnostic: %+v", got)
+	}
+}
 
 func TestDoctorDoesNotCreateFilesOrExposeConnectionSecrets(t *testing.T) {
 	dir := t.TempDir()

@@ -14,7 +14,7 @@ func (t *ToolSet) proposeLesson() actool.CoreTool {
 			"summary":      str("200字以内的经验摘要"),
 			"resolution":   str("1200字以内：适用前置、失败原因、具体修正与限制；不要保存密码或令牌"),
 			"tags":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "maxItems": 12},
-			"evidence_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "minItems": 1, "maxItems": 8},
+			"evidence_ids": map[string]any{"type": "array", "description": "当前任务tool_result活动记录的id，可从执行轨迹步骤读取；不是fact、finding或意图节点id，不得猜测", "items": map[string]any{"type": "integer"}, "minItems": 1, "maxItems": 8},
 		}, "tool", "summary", "resolution", "evidence_ids"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			if t.ts == nil || t.taskID <= 0 {
 				return actool.Errorf("经验提议需要有效任务上下文"), nil

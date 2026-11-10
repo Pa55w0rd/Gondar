@@ -41,7 +41,7 @@ func (s *Server) pinnedTool(tool hosttools.Tool) (hosttools.InstallPin, error) {
 func verifyToolArchive(blob []byte, pin hosttools.InstallPin) error {
 	sum := sha256.Sum256(blob)
 	if !strings.EqualFold(fmt.Sprintf("%x", sum), pin.SHA256) {
-		return fmt.Errorf("工具归档 SHA256 与管理员锁定清单不一致，拒绝解压与安装")
+		return fmt.Errorf("下载内容的 SHA256 与检测到的确切版本不一致，拒绝安装")
 	}
 	return nil
 }

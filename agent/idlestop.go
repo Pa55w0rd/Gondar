@@ -215,7 +215,6 @@ func (s *idleStopper) totalLocked() int {
 	return s.writes().Total()
 }
 
-
 // idleStopHooks 把 idleStopper 挂在 harness 的 hook 链上。
 //
 // 它是**旁路观察 + 收场请求**的组合：
@@ -355,9 +354,12 @@ func wrapIdleStop(inner harness.HookRunner, writes func() WriteCounts, onStop fu
 //   - 不推进计数。写回会让 writes 增长，计数自然被 refreshLocked 清零；
 //     再额外推进一次等于把「有产出」的一轮算成两轮。
 var idleStopWriteTools = map[string]bool{
-	"record_fact":     true,
-	"insert_assets":   true,
-	"report_finding":  true,
+	"record_fact":       true,
+	"insert_assets":     true,
+	"report_finding":    true,
+	"save_evidence":     true,
+	"register_resource": true,
+	"update_resource":   true,
 }
 
 // idleStopMessage 是收场时给模型的说明。
@@ -365,7 +367,7 @@ var idleStopWriteTools = map[string]bool{
 // 说清「为什么收」很重要：模型看到「预算耗尽被终止」会以为是被惩罚，于是
 // 倾向于把还没验证的东西也写成结论；看到「这个方向没有新产出，请把已确认的
 // 写回并停手」它会正确地把已确认的收好。
-const idleStopMessage = "本轮已连续多轮没有任何新发现被写回——这个方向暂时探不到新的东西了。请立刻停止继续探测：把你**已经确认**的结果写回（资产用 insert_assets、结论用 record_fact、确认漏洞用 report_finding），然后用一句话纯文本总结你探到了什么、卡在哪里，结束本轮。不要为了「有产出」而把没验证的猜测写成事实。"
+const idleStopMessage = "本轮已连续多轮没有任何新发现被写回——这个方向暂时探不到新的东西了。请立刻停止继续探测：把你**已经确认**的结果写回（资产用 insert_assets、结论用 record_fact、确认漏洞用 report_finding、已有证据附件用 save_evidence；资源台账可用 register_resource/update_resource 保存实际状态），然后用一句话纯文本总结你探到了什么、卡在哪里，结束本轮。不要为了「有产出」而把没验证的猜测写成事实。"
 
 // logIdleStop 记一条收场日志（统一格式，便于事后统计）。
 func logIdleStop(worker string, taskID int64, intentID int64, reason string) {
@@ -383,6 +385,7 @@ func summarizeWriteDelta(cur, prev WriteCounts) string {
 // planner 靠它区分两种 exhausted：
 //   - 「被墙钟掐断」（还有明确的下一步，只是没时间）
 //   - 「探到边界」（这个方向本身没东西了）
+//
 // 这两种在 planner 的决策里完全相反，混在一起就会导致「一直续派同一方向」。
 func idleStopStateText(reason string) string {
 	return strings.TrimSpace(reason)

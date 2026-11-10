@@ -17,6 +17,8 @@ var plannerStateReads = map[string]bool{
 	"graph_overview": true, "list_intents": true, "list_facts": true,
 	"list_findings": true, "list_assets": true, "get_node": true,
 	"list_goals": true, "get_worker_output": true,
+	"node_detail": true, "recall_lessons": true, "list_untested_assets": true,
+	"list_resources": true,
 }
 
 type plannerReadLoop struct {

@@ -3286,6 +3286,7 @@ function CreateTaskSheet({
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
+	const [completionMode,setCompletionMode]=React.useState<"objective"|"continuous">("continuous");
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 简短单步骤优先下发种子意图，复杂说明仍规划；默认关闭
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
@@ -3371,6 +3372,7 @@ function CreateTaskSheet({
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
         timeoutSeconds: timeoutSec,
+		completionMode,
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
@@ -3391,6 +3393,7 @@ function CreateTaskSheet({
       setCompanyIDs([]);
       setLLMProfileIDs([]);
       setTimeoutMin("");
+	  setCompletionMode("continuous");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
@@ -3442,6 +3445,7 @@ function CreateTaskSheet({
                 setInterceptRules(template.intercept_rules ?? []);
                 if (template.scene) {
                   setTimeoutMin(String(template.scene.timeout_seconds / 60));
+				  setCompletionMode(template.scene.completion_mode ?? "objective");
                   setSeedFirstIntent(template.scene.seed_first_intent);
                   setCoverageEnabled(template.scene.coverage_enabled);
                 }
@@ -3640,6 +3644,14 @@ function CreateTaskSheet({
               <FieldDescription>按列表顺序故障转移；第一项为当前配置，仅在明确额度不足时切换下一项。</FieldDescription>
             </Field>
 
+			<Field>
+			  <FieldLabel htmlFor="completion-mode">任务完成策略</FieldLabel>
+			  <NativeSelect id="completion-mode" value={completionMode} onChange={(e)=>setCompletionMode(e.target.value as "objective"|"continuous")}>
+			    <NativeSelectOption value="continuous">持续挖掘</NativeSelectOption>
+			    <NativeSelectOption value="objective">目标达成后结束</NativeSelectOption>
+			  </NativeSelect>
+			  <FieldDescription>持续挖掘会保留已有成果并处理未验证方向；新增漏洞或交付清单不会直接结束任务。防空转、预算与故障保护仍生效，无进展时暂停或停止。</FieldDescription>
+			</Field>
             {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}
             <Collapsible>
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 font-medium text-sm">

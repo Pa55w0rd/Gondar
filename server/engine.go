@@ -80,7 +80,7 @@ var errWorkControlConflict = errors.New("work control conflict")
 // In particular, a quota error after partial streaming advances the task cursor
 // for the next LLM call but must not replay this whole intent on the backup.
 func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
-	return reason == harness.ReasonModelError && !isTaskLLMRuntimeError(err) && !errors.Is(err, agent.ErrModelCallTimeout)
+	return reason == harness.ReasonModelError && !isTaskLLMRuntimeError(err) && !errors.Is(err, agent.ErrModelCallTimeout) && !errors.Is(err, agent.ErrTaskBudgetExpired)
 }
 
 // isTransientContextCanceled：worker run 以 err 携带 context canceled 收场、但任务级
@@ -103,8 +103,9 @@ func isTransientContextCanceled(err error) bool {
 // (re)installed at runtime (LLM configured from the UI); the loops always run
 // but idle until an LLM is set.
 type Engine struct {
-	m        *Manager
-	debounce time.Duration
+	m                 *Manager
+	debounce          time.Duration
+	plannerRetryDelay time.Duration // test override; production defaults to 30 seconds
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
@@ -179,7 +180,13 @@ type workExecution struct {
 
 // nextPlannerRound returns the next planner round number for a task (1-based).
 func (e *Engine) nextPlannerRound(taskID string) int {
-	v, _ := e.plannerRound.LoadOrStore(taskID, 0)
+	initial := 0
+	if _, loaded := e.plannerRound.Load(taskID); !loaded && e.m != nil && e.m.pg != nil {
+		if p, err := e.m.pg.GetTaskProgress(taskID); err == nil && p != nil {
+			initial = int(p.RoundNo)
+		}
+	}
+	v, _ := e.plannerRound.LoadOrStore(taskID, initial)
 	n := v.(int) + 1
 	e.plannerRound.Store(taskID, n)
 	return n
@@ -828,9 +835,9 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 //	小时零规划轮、零新意图——「运行中 Worker」恒为 0，任务状态仍是 running
 //	却什么都不干。重启服务立即恢复。
 //
-//	15 分钟的由来：实测一轮规划（1M 上下文 + 几十次工具调用）3–5 分钟，15 分钟
-//	给三倍冗余；同时保证「上游卡死」最多浪费 15 分钟就自愈，不会无限期哑火。
-const plannerRoundTimeout = 15 * time.Minute
+// 主探索最多5分钟，另有1分钟持久化收尾；较短运行配置优先。
+// 此处还独立约束不响应取消的规划调用，连续超时会触发任务故障保护。
+const plannerRoundTimeout = 6 * time.Minute
 
 // plannerRoundTimeoutOverride 让测试能用秒级上限验证「规划轮卡住也不拖死
 // planner 循环」。生产路径不设置它（保持 plannerRoundTimeout）。
@@ -912,9 +919,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	// 触发第一轮规划。之后每次唤醒(边沿/心跳)都重臂 = 距上次任意规划触发的时长。
 	heartbeat := time.NewTimer(interval)
 	defer heartbeat.Stop()
+	retryTimer := time.NewTimer(time.Hour)
+	retryTimer.Stop()
+	defer retryTimer.Stop()
+	var retryC <-chan time.Time
+	retryWanted := false
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
+		retryWanted = false
 		// 有挂起收尾：先尝试收尾；未满足（goal_met 仍在跑意图）就等下一次唤醒，
 		// 不再跑规划——否则 goal_met 之后又派新意图，任务永远停不下来。
 		// 例外：用户刚新增目标/提示 → 撤销非硬上限的收尾并继续规划（max_rounds 是硬上限）。
@@ -964,7 +977,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// met→cancelExec 杀掉用户经主 agent 直投的意图。是否结束改由 frontier 决定：
 		// 还有 open/running 意图 → 保持 running、静默等待；意图已全部跑干 → 落 done。
 		// 整段纯 Go、不触发任何 LLM 调用，也不打规划轮 marker。
-		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
+		if open, err := t.Store.HasOpenGoal(); err == nil && !open && t.lifecycleSnapshot().CompletionMode != db.CompletionContinuous {
 			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
@@ -1004,10 +1017,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 此后 6 小时零规划轮、零新意图——「运行中 Worker」恒为 0，任务看着还在
 		// running 却什么都不干。重启服务即恢复。
 		//
-		// 15 分钟的由来：实测一轮规划（1M 上下文 + 几十次工具调用）3–5 分钟；
-		// 15 分钟给它三倍冗余，同时保证「上游卡死」最多浪费 15 分钟就能自愈，
-		// 不会像之前那样无限期哑火。
-		roundCtx, roundCancel := context.WithTimeout(ectx, plannerRoundLimit())
+		// 主探索5分钟及1分钟收尾构成硬上限；较短的配置继续夹逼。
+		roundLimit := min(plannerRoundLimit(), planner.RoundLimit())
+		roundCtx, roundCancel := context.WithTimeout(ectx, roundLimit)
 		defer roundCancel()
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
@@ -1040,6 +1052,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			return planner.Plan(ctx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		})
 		e.EndLLMCall(t.ID)
+		code := plannerFailureCode(res.err, roundCtx.Err() != nil && ectx.Err() == nil)
+		e.recordPlannerOutcome(ectx, t, int64(round), code)
+		retryWanted = e.shouldRetryIdlePlanner(ectx, t, code)
 		switch {
 		case res.err != nil && roundCtx.Err() != nil && ectx.Err() == nil:
 			// 规划轮超时（本轮自身的墙钟上限到了，不是任务 deadline）。
@@ -1055,14 +1070,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
 			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
 			// 归为 stopped(而非 blocked)。
-			e.cancelExec(t.ID, agent.AbortGoalMet)
+			// Settlement is registered below while ectx is still live. Cancelling it
+			// here used to skip the request and leave done waiting for a heartbeat.
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
 		// 自动收尾判定（v0.5.0）：只登记原因，真正 settle 由 plannerLoop 在本轮
 		// inflight 释放后执行（避免 drain 等自己）。
 		if res.err == nil && ectx.Err() == nil && !e.isSettling(t.ID) {
-			if res.met {
+			if res.met && t.lifecycleSnapshot().CompletionMode != db.CompletionContinuous {
 				t.requestSettle("goal_met", "planner 判定目标达成")
 			} else {
 				e.recordAndEvaluateAutoFinish(t, int64(round), triggers)
@@ -1082,6 +1098,22 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			// 周期兜底:死锁兜底 + 唤醒去监督飞行中的 worker(steer/kill) + 周期复查。
 			runRound("heartbeat")
 			e.maybePendingSettle(ctx, t)
+		case <-retryC:
+			retryC = nil
+			runRound("bounded-retry")
+			e.maybePendingSettle(ctx, t)
+		}
+		if retryWanted {
+			resetPlannerTimer(retryTimer, e.plannerRetryLimit())
+			retryC = retryTimer.C
+		} else {
+			if !retryTimer.Stop() {
+				select {
+				case <-retryTimer.C:
+				default:
+				}
+			}
+			retryC = nil
 		}
 		// 每次唤醒(边沿或心跳)后重臂心跳:任意规划触发都重算这段静置计时。
 		resetPlannerTimer(heartbeat, interval)

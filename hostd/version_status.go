@@ -82,7 +82,7 @@ func finishVersionStatus(info *ToolVersion) {
 	if info.Kind == hosttools.KindApt {
 		info.UpdateAvailable = info.Available && aptVersionNewer(info.InstalledVersion, info.LatestVersion)
 	}
-	if info.Kind == hosttools.KindData {
+	if info.Kind == hosttools.KindData || (info.Kind == hosttools.KindSource && info.ToolID == "responder") {
 		info.UpdateAvailable = info.Available && info.InstalledVersion != "" && info.LatestVersion != "" && info.InstalledVersion != info.LatestVersion
 	}
 	info.State = "missing"

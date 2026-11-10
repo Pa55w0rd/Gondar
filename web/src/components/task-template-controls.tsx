@@ -511,7 +511,7 @@ export function TaskTemplateControls({
             </ComboboxList>
           </ComboboxContent>
         </Combobox>
-        <FieldDescription>内置八类场景填写对象后复制描述、目标和建议时限/启动方式；自定义模板也支持 {"{{target}}"}。应用后可调整，不与模板保持关联。</FieldDescription>
+        <FieldDescription>内置场景填写对象后复制描述、目标和建议时限/启动方式；自定义模板也支持 {"{{target}}"}。应用后可调整，不与模板保持关联。</FieldDescription>
       </Field>
 
       <TaskSceneDialog template={sceneTemplate} onClose={() => {
