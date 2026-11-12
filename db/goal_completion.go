@@ -6,9 +6,31 @@ import (
 	"fmt"
 )
 
+// A legacy met flag is not a proof. Preserve the row, but expose missing proof
+// and explicit unverified markers to every completion and planning caller.
+const provenGoalSQL = `(state='met' AND COALESCE(payload->>'unverified','false')<>'true'
+AND COALESCE(payload->>'proof_evidence_id','') ~ '^[1-9][0-9]*$')`
+
 func (s *ExplorationStore) GoalCompletionCounts(ctx context.Context) (total, unmet int, err error) {
-	err = s.db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE state<>'met') FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal'`, s.expID).Scan(&total, &unmet)
+	err = s.db.QueryRowContext(ctx, `SELECT count(*),count(*) FILTER(WHERE NOT `+provenGoalSQL+`) FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal'`, s.expID).Scan(&total, &unmet)
 	return
+}
+
+func GoalOverview(n *Node) map[string]any {
+	var p map[string]any
+	_ = json.Unmarshal(n.Payload, &p)
+	proof := "pending"
+	if n.State == "met" {
+		proof = "unknown"
+		if p["unverified"] == true {
+			proof = "unverified"
+		} else if id, ok := p["proof_evidence_id"].(float64); ok && id > 0 {
+			proof = "proved"
+		}
+	}
+	return map[string]any{"id": n.ID, "state": n.State, "text": p["text"],
+		"proof_status": proof, "unverified": p["unverified"], "unverified_reason": p["unverified_reason"],
+		"proof_evidence_id": p["proof_evidence_id"], "proof_reason": p["proof_reason"]}
 }
 
 // ProveGoal commits the evidence link and state together. A goal edited since

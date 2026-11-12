@@ -6,7 +6,7 @@ Gondar 是从 **ARTEX 开源代码二次开发**而来的个人实验项目。�
 
 本项目从 **0.1** 重新编号。这是版本命名调整，不是回滚代码或删除此前的修改。公开仓库以源码快照建立首次提交，之前的维护历史与标签保存在本地；首次提交的作者身份不改变上游代码的版权归属。
 
-当前版本为 **0.3.0**（构建 `0.3.0`）：修复提前收口、停止状态和流式工具参数问题，增加逐格验证账本及空报告恢复，改进持续挖掘、证据交接和完成判定。包含原0.2.2的配置时限修复，保留防空转、授权边界和故障保护。详见 [更新说明](RELEASE_NOTES.md)。
+当前版本为 **0.3.1**（构建 `0.3.1`）：修复持续接续、验证交付、旧目标证明和CIDR筛选问题，增加明确的等待交接与紧凑分页，保留既有成果、防空转、授权边界和故障保护。详见 [更新说明](RELEASE_NOTES.md)。
 
 ## 来源与版权
 
@@ -31,7 +31,7 @@ Gondar 是从 **ARTEX 开源代码二次开发**而来的个人实验项目。�
 
 ## Docker 部署
 
-Docker Hub 镜像为 [pa55w0rd01/gondar](https://hub.docker.com/r/pa55w0rd01/gondar)，当前版本使用 `0.3.0` 标签，`latest` 指向最新发行版。实际平台与固定镜像摘要见 [Releases](https://github.com/Pa55w0rd/Gondar/releases/tag/v0.3.0)。
+Docker Hub 镜像为 [pa55w0rd01/gondar](https://hub.docker.com/r/pa55w0rd01/gondar)，当前版本使用 `0.3.1` 标签，`latest` 指向最新发行版。实际平台与固定镜像摘要见 [Releases](https://github.com/Pa55w0rd/Gondar/releases/tag/v0.3.1)。
 
 ```bash
 git clone https://github.com/Pa55w0rd/Gondar.git
@@ -57,10 +57,10 @@ docker compose up -d
 bash ./install.sh --verify-only --version=latest -y
 
 # 二进制模式：安装程序、PostgreSQL和systemd服务，首次启动后在页面设置密码。
-sudo bash ./install.sh --mode=binary --version=v0.3.0 -y
+sudo bash ./install.sh --mode=binary --version=v0.3.1 -y
 
 # Docker模式：使用Releases部署说明中公布并核对过的完整镜像摘要。
-sudo bash ./install.sh --mode=docker --version=v0.3.0 \
+sudo bash ./install.sh --mode=docker --version=v0.3.1 \
   --image='pa55w0rd01/gondar@sha256:在此填入Releases公布的完整摘要' -y
 ```
 
@@ -83,7 +83,7 @@ Docker中使用应用内更新时，程序替换发生在当前容器可写层�
 ```bash
 git clone https://github.com/Pa55w0rd/Gondar.git
 cd Gondar
-GONDAR_BUILD_VERSION=0.3.0 GONDAR_OUTPUT=dist/amd64/gondar ./build.sh --target linux/amd64
+GONDAR_BUILD_VERSION=0.3.1 GONDAR_OUTPUT=dist/amd64/gondar ./build.sh --target linux/amd64
 docker build -t gondar:local .
 cp .env.example .env
 # 将 .env 的 GONDAR_IMAGE 改为 gondar、GONDAR_TAG 改为 local，并配置数据库密码：

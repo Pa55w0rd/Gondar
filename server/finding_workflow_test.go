@@ -111,23 +111,30 @@ func TestFindingWorkflowAutoHintToPlannerAndSetting(t *testing.T) {
 		}
 	}
 	list := workflowCall(t, ctx, s.toolListTaskFindings(), map[string]any{"task_id": task.ID}, false)
-	var nodes []struct {
-		ID            int64 `json:"id"`
-		FindingID     int64 `json:"finding_id"`
-		FindingNodeID int64 `json:"finding_node_id"`
-		Count         int   `json:"traffic_count"`
+	var page struct {
+		Findings []struct {
+			ID            int64 `json:"id"`
+			FindingID     int64 `json:"finding_id"`
+			FindingNodeID int64 `json:"finding_node_id"`
+			Count         int   `json:"traffic_count"`
+		} `json:"findings"`
+		Total   int  `json:"total"`
+		HasMore bool `json:"has_more"`
 	}
-	if err := json.Unmarshal([]byte(list), &nodes); err != nil {
+	if err := json.Unmarshal([]byte(list), &page); err != nil {
 		t.Fatal(err)
 	}
 	found := false
-	for _, n := range nodes {
+	for _, n := range page.Findings {
 		if n.ID == recorded.NodeID {
 			found = n.FindingID == recorded.FindingID && n.FindingNodeID == recorded.NodeID && n.Count == 3
 		}
 	}
 	if !found {
 		t.Fatal("canonical IDs/count missing", list)
+	}
+	if page.Total != 2 || page.HasMore {
+		t.Fatalf("finding page lost completeness: %s", list)
 	}
 	workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": recorded.FindingID}, false)
 	wrong := workflowCall(t, ctx, s.toolGetFindingTraffic(), map[string]any{"finding_id": int64(900000000000000000)}, true)

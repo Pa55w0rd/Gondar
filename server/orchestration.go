@@ -363,8 +363,8 @@ func (s *Server) toolGetTaskGraph() actool.CoreTool {
 }
 
 func (s *Server) toolListTaskFindings() actool.CoreTool {
-	return roTool("list_task_findings", "读指定任务的确认漏洞(含 flag/PoC；每条带 id/task_id/intent_id/vulnclass/severity/摘要/状态)，用 task_id 指定任务。",
-		objSchema(map[string]any{"task_id": strParam("任务 id")}, "task_id"),
+	return roTool("list_task_findings", "分页读指定任务的已登记漏洞材料，不等同人工确认。返回findings/total/has_more/next_before；默认20，最多50，按next_before继续，不把首屏当全部。",
+		objSchema(map[string]any{"task_id": strParam("任务 id"), "limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50}, "before": map[string]any{"type": "integer", "minimum": 0}, "q": strParam("可选摘要关键词")}, "task_id"),
 		func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 			return s.delegateToTask(ctx, in, (*agent.ToolSet).ListFindingsTool)
 		})
@@ -527,7 +527,7 @@ func (s *Server) seedOrchestrationTools() {
 // reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
 // Bump the flag whenever these tools' schemas/descriptions change in code.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v8_spawntask_one_target"
+	const flag = "tool_schema_refresh_v9_findings_pagination"
 	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
 		return
 	}

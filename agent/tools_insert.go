@@ -566,7 +566,8 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
 			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
 			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
-			"limit":  intp("返回上限，默认 10（可选）"),
+			"limit":  intp("返回上限，默认10，最多50；按has_more/next_offset翻页"),
+			"detail": map[string]any{"type": "boolean", "description": "默认紧凑字段；明确id/ids时可设true读取完整资产详情"},
 			"offset": intp("分页偏移，默认 0（可选）"),
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -580,14 +581,28 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				IDs    []int64 `json:"ids"`
 				Limit  int     `json:"limit"`
 				Offset int     `json:"offset"`
+				Detail bool    `json:"detail"`
 			}
 			_ = json.Unmarshal(in, &a)
 			if a.Limit <= 0 {
 				a.Limit = 10
 			}
+			if a.Limit > 50 {
+				a.Limit = 50
+			}
+			if a.Offset < 0 {
+				a.Offset = 0
+			}
+			if len(a.IDs) > 50 {
+				return actool.Errorf("ids最多50项，请分批按明确编号读取"), nil
+			}
+			if a.Detail && a.ID <= 0 && len(a.IDs) == 0 {
+				return actool.Errorf("完整详情只允许明确id/ids；DSL检索返回紧凑分页"), nil
+			}
 
 			var assets []*db.Asset
 			var err error
+			total := 0
 			switch {
 			case a.ID > 0:
 				assets, err = t.as.GetByIDsInScope(t.taskID, []int64{a.ID})
@@ -595,6 +610,9 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				assets, err = t.as.GetByIDsInScope(t.taskID, a.IDs)
 			case a.DSL != "":
 				assets, err = t.as.QueryDSLInScope(a.DSL, a.Type, t.taskID, a.Limit, a.Offset)
+				if err == nil {
+					total, err = t.as.CountDSLInScope(a.DSL, a.Type, t.taskID)
+				}
 			default:
 				return actool.Errorf("未传 id/ids 时 dsl 不能为空：不允许无条件查询全部资产，请提供查询条件"), nil
 			}
@@ -604,10 +622,15 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				// 「正确写法」提示，agent 才能自己纠正。
 				return actool.Errorf("DSL 错误: " + err.Error() + "\n" + dslHint(err.Error())), nil
 			}
-			return jsonResult(map[string]any{
-				"count":  len(assets),
-				"assets": assets,
-			})
+			if a.ID > 0 || len(a.IDs) > 0 {
+				total = len(assets)
+			}
+			var result any = compactAssets(assets)
+			if a.Detail {
+				result = assets
+			}
+			more := a.ID == 0 && len(a.IDs) == 0 && a.Offset+len(assets) < total
+			return jsonResult(map[string]any{"count": len(assets), "assets": result, "total": total, "has_more": more, "next_offset": a.Offset + len(assets), "detail": a.Detail})
 		},
 	)
 }

@@ -63,6 +63,7 @@ type TaskDTO struct {
 	CoverageEnabled    bool               `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
 	CompletionMode     string             `json:"completion_mode"`
 	TimeoutSeconds     int                `json:"timeout_seconds"`
+	PlannerWait        json.RawMessage    `json:"planner_wait,omitempty"`
 }
 
 // FindingSeverityDTO 是任务列表里按严重度分档的漏洞计数（严重/高/中/低）。
@@ -105,6 +106,10 @@ func tokenTotalDTO(u db.TokenUsage) TokenTotalDTO {
 
 func taskDTO(t *Task, status string) TaskDTO {
 	lifecycle := t.lifecycleSnapshot()
+	var plannerWait json.RawMessage
+	if lifecycle.Paused && t.Store != nil {
+		plannerWait, _ = t.Store.LatestPlannerWait()
+	}
 	llmState := t.llmStateSnapshot()
 	sourceIDs := make([]string, 0, len(lifecycle.SourceTaskIDs))
 	for _, id := range lifecycle.SourceTaskIDs {
@@ -137,6 +142,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CompanyIDs:         lifecycle.CompanyIDs,
 		CoverageEnabled:    t.CoverageEnabled,
 		CompletionMode:     lifecycle.CompletionMode, TimeoutSeconds: lifecycle.TimeoutSeconds,
+		PlannerWait: plannerWait,
 	}
 }
 
@@ -229,6 +235,7 @@ type GoalDTO struct {
 	// prove_goal 的逐条证据链。报告与界面据此区分「被证明」和「被声称」。
 	Unverified       bool   `json:"unverified,omitempty"`
 	UnverifiedReason string `json:"unverified_reason,omitempty"`
+	ProofStatus      string `json:"proof_status"`
 }
 
 func goalDTO(n *db.Node) GoalDTO {
@@ -245,6 +252,7 @@ func goalDTO(n *db.Node) GoalDTO {
 		VulnClass:        p.VulnClass,
 		Unverified:       p.Unverified,
 		UnverifiedReason: p.UnverifiedReason,
+		ProofStatus:      db.GoalOverview(n)["proof_status"].(string),
 		State:            n.State,
 		Origin:           n.Origin,
 		TS:               rfc3339(n.CreatedAt),

@@ -173,7 +173,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 		t.Fatalf("list_facts direct-only: source=%v grand=%v payload=%#v", seenSource, seenGrand, facts)
 	}
 
-	findings := callReadJSON(t, tools.listFindings(), `{}`).([]any)
+	findings := callReadJSON(t, tools.listFindings(), `{}`).(map[string]any)["findings"].([]any)
 	if len(findings) != 1 {
 		t.Fatalf("list_findings: %#v", findings)
 	}

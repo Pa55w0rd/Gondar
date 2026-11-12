@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -506,6 +507,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	}
 	sysBody += artifactGuidance // 证据附件（v0.5.0）：截图/样本存档纪律
 	sysBody += sqlmapGuidance   // SQL 注入专项：sqlmap 实测 + 可复测命令（v0.4.12）
+	sysBody += verificationReceiptGuidance
 	// 意图块 → 意图锚定资产块 → 相关既有事实 → 启动指令，依次追加到 system 尾部
 	//（与 constraintBlock 同一套追加法）。
 	sysBody += renderIntentTask(intent)
@@ -606,13 +608,21 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			logIdleStop(name, taskID, intent.ID, reason)
 		}, stopRun)
 	}
-	opts.Hooks = idleHooks
+	delivery := &verificationDeliveryGuard{inner: idleHooks}
+	opts.Hooks = delivery
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
 		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
 	}
 	intentID := intent.ID
 	emitWrap := func(r db.Activity) {
+		if r.Kind == "result" {
+			r.Detail += delivery.receiptSummary()
+			if delivery.pendingCount() > 0 {
+				r.IsError = true
+				r.Summary = "验证记账交付尚未完成，已保留实际成果"
+			}
+		}
 		if emit != nil {
 			r.NodeID, r.Worker = &intentID, name
 			emit(r)
@@ -671,6 +681,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
 	reason, err = workerIdleOutcome(parentCtx, ctx, idleHooks, reason, err)
+	if parentCtx.Err() == nil && delivery.pendingCount() > 0 {
+		err = errors.Join(ErrVerificationDelivery, err)
+	}
 	return reason, tsx.Writes(), err
 }
 

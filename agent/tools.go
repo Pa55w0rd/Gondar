@@ -95,10 +95,11 @@ type ToolSet struct {
 	// ownerNode is the exploration node that writes attach to: assets this run
 	// touches get anchored to it as lineage/provenance (NOT visibility — the asset
 	// graph is global and shared). Worker = its claimed intent; planner = begin root.
-	ownerNode int64
-	GoalMet   bool
-	Reason    string
-	writes    WriteCounts
+	ownerNode   int64
+	GoalMet     bool
+	Reason      string
+	plannerWait *PlannerWait
+	writes      WriteCounts
 	// lastMissingAssets holds the asset ids referenced by the most recent
 	// record_fact call that do NOT exist in the asset table. The tool result
 	// reports them back so the model stops reusing a fabricated id.
@@ -464,9 +465,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
 	gsum := make([]map[string]any, 0, len(goals))
 	for _, g := range goals {
-		var p map[string]any
-		_ = json.Unmarshal(g.Payload, &p)
-		gsum = append(gsum, map[string]any{"id": g.ID, "state": g.State, "text": p["text"]})
+		gsum = append(gsum, db.GoalOverview(g))
 	}
 	out["goals"] = gsum
 	// hints: 人类/主 agent 通过 add_hint 挂上图的战略提示；folded in so the
@@ -663,7 +662,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 					m["denominator"] = cov.Denominator
 					m["tested"] = cov.Tested
 					m["by_type"] = cov.ByType
-					m["note"] = "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产【通常不调用list_untested_assets，按照任务推进即可】；"
+					m["note"] = "coverage资产测试覆盖度（包括接口等各种相关资产），粗略估计、仅供参考：包含当前任务与直接关联任务的 scope、事实锚点；关联 scope 只读。容器型资产/大量枚举会让它偏低，勿据此认为已测完；可用 add_task_scope 增补本任务范围、list_untested_assets 看未测资产；队列为空时按需取少量未测候选核对，不能以资产锚定比例代替实际验证；"
 					if cov.Denominator == 0 {
 						m["pct"] = nil
 						m["status"] = "范围未锚定"
@@ -1102,10 +1101,27 @@ func compactFinding(n *db.Node) map[string]any {
 }
 
 func (t *ToolSet) listFindings() actool.CoreTool {
-	return t.readExpTool("list_findings", "列本任务及直接关联任务的【确认漏洞】(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。这里只含漏洞；普通探索事实用 list_facts，详情用 node_detail(id)。",
-		obj(map[string]any{}),
-		func(context.Context, json.RawMessage) (actool.Result, error) {
-			f, _ := t.ts.ListByKindWithSources(db.KindFinding, 500)
+	return t.readExpTool("list_findings", "分页列本任务及直接关联任务的【已登记漏洞材料，不等同人工确认】。默认20条、最多50，用has_more/next_before继续；可按q过滤。(紧凑：id+task_id+intent_id+vulnclass+severity+摘要+状态)。关联任务条目带 source_task_id/inherited=true 且只读。这里只含漏洞；普通探索事实用 list_facts，详情用 node_detail(id)。",
+		obj(map[string]any{"limit": intp("默认20，最多50"), "before": idp("上一页next_before，省略取最新"), "q": str("可选摘要关键词")}),
+		func(_ context.Context, raw json.RawMessage) (actool.Result, error) {
+			var in struct {
+				Limit  int    `json:"limit"`
+				Before int64  `json:"before"`
+				Q      string `json:"q"`
+			}
+			if err := json.Unmarshal(raw, &in); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			if in.Limit <= 0 {
+				in.Limit = 20
+			}
+			if in.Limit > 50 {
+				in.Limit = 50
+			}
+			f, more, total, err := t.ts.ListByKindPageWithSources(db.KindFinding, in.Before, in.Limit, in.Q)
+			if err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
 			if err := t.ts.PopulateFindingTrafficIDs(f); err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
@@ -1130,7 +1146,11 @@ func (t *ToolSet) listFindings() actool.CoreTool {
 				}
 				out = append(out, m)
 			}
-			return jsonResult(out)
+			var next int64
+			if len(f) > 0 {
+				next = f[len(f)-1].ID
+			}
+			return jsonResult(map[string]any{"findings": out, "total": total, "has_more": more, "next_before": next})
 		})
 }
 
@@ -1363,16 +1383,16 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 func (t *ToolSet) addIntent() actool.CoreTool {
 	return t.writeExpTool("add_intent", "生成【探索方向】写入 frontier，并连入探索链路。意图是开放的探索方向，不是固定类型——用 summary 一句话自由描述要探索/验证/利用什么。\n"+
 		"★优先批量：一轮筛出的多个新方向放进 intents 数组一次提交（比逐条调用省往返）。返回 ids 数组，与 intents 等长同序（失败项 id=0，详情见 errors）。单条则省略 intents 直接给顶层 summary。",
-		obj(map[string]any{
+		intentInputSchema(obj(map[string]any{
 			"intents":          map[string]any{"type": "array", "description": "【优先用这个】要新增的探索方向数组，按顺序处理。每个元素字段同下方顶层字段（summary/asset_ids/parent_ids/priority）。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
 			"summary":          str("[单条] 一句话描述这个探索方向：做什么+为什么。已写清方向即可，不依赖资产 id。"),
 			"asset_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "本方向要测试/攻击的【目标资产 id】（**尽量传**，0/1/多个；是 list_assets 返回的资产 id，不是探索节点 id）：这条探索方向针对哪些资产（站点/接口/参数/主机等）。只要方向围绕某些具体资产就务必传上——它是「这条探索打哪些目标」的结构化标记，用于覆盖去重、把意图连入资产链路。仅当纯全局侦察、确实没有具体目标资产时才留空。"},
 			"parent_ids":       map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "上游锚点 id（可选，0/1/多个）：本方向由哪些【已确认的事实(fact)/发现(finding)】综合得出。**只能填已存在的 fact/finding 节点 id,不能填意图/目标/提示**——意图必须锚在已确认知识上,发现驱动而非凭空规划。多个事实共同产生一个新意图就传多个;顶层全新侦察方向请留空（会自动挂到任务起点 origin fact）。"},
-			"continues":        map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "【仅接续已收场方向时填】上游【意图】节点 id（最多32条）：只接受 done/blocked/exhausted/stopped；open/running/paused应等待、纠偏或恢复原意图。一个来源已有未完成接续时不能并行再接。只在 summary 明说接续哪个方向时填，最多3代；超限请换本质不同方向。全新方向留空。"},
+			"continues":        map[string]any{"type": "array", "maxItems": 32, "items": map[string]any{"type": "integer"}, "description": "仅接续已收场方向时填写【意图ID数组】，例如[123]；单个ID也必须用数组。只接受done/blocked/exhausted/stopped，已有未完成接续不重复领取。只限制连续无新证据的续派，有实质新证据不限制总链深；全新方向留空。parent_ids只填写事实或发现ID。"},
 			"priority":         intp("优先级 0-10，默认5。直接逼近目标的利用链步=8-10；新入口面首次探明=6-7；补覆盖/复核=3-4；纯情报=1-2。同轮多意图按价值区分，别全默认 5。"),
 			"hypothesis":       str("【建议填】本方向的假设：依据哪条 fact 的什么推测（引用 fact id）。worker 会以它为验证目标，你下轮判「有没有产出」也有对照锚。"),
 			"success_criteria": str("【建议填】怎么算成了/没成：期望拿到的 fact/finding 形态（如「拿到 admin cookie 的请求响应」/「证实参数 X 不可注入的输出」）。"),
-		}),
+		})),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
 				Intents    []intentItem `json:"intents"`
@@ -2506,6 +2526,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.recordPlannerWait(),
 		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		t.listArtifacts(), t.previewEvidence(), t.proposeLesson(), t.recallLessons(),

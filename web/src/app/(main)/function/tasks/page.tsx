@@ -1281,7 +1281,7 @@ const TaskRow = React.memo(function TaskRow({
         {task.goal}
       </TableCell>
       <TableCell>
-        <StatusBadge domain="task" value={task.status} dot />
+        {task.planner_wait ? <span className="text-amber-600 text-xs" title={task.planner_wait.reason}>等待条件</span> : <StatusBadge domain="task" value={task.status} dot />}
       </TableCell>
       <TableCell className="text-center text-muted-foreground text-xs tabular-nums">
         {typeof task.goals_total === "number" && task.goals_total > 0 ? (

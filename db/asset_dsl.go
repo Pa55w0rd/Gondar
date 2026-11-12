@@ -344,9 +344,9 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		}
 		switch e.Op {
 		case "=", "==":
-			return "try_inet(ip) >>= " + b.next(e.Value), nil
+			return "try_inet(ip) <<= " + b.next(e.Value), nil
 		case "!=":
-			return "(try_inet(ip) IS NULL OR NOT (try_inet(ip) >>= " + b.next(e.Value) + "))", nil
+			return "(try_inet(ip) IS NULL OR NOT (try_inet(ip) <<= " + b.next(e.Value) + "))", nil
 		default:
 			return "", fmt.Errorf("cidr 只支持 = 与 !=（网段包含）")
 		}

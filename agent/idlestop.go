@@ -313,6 +313,7 @@ func workerIdleOutcome(parentCtx, runCtx context.Context, hooks *idleStopHooks, 
 var idleStopWriteTools = map[string]bool{
 	"record_fact": true, "insert_assets": true, "report_finding": true,
 	"save_evidence": true, "register_resource": true, "update_resource": true,
+	"record_verification": true,
 }
 
 const idleStopMessage = "本轮需要保存检查点：近期没有新的成功回显或已到保存间隔，这不表示该方向已安全或没有价值。请停止新的探测，把已确认观察、负结果及未完成步骤用 record_fact 保存，确认漏洞用 report_finding，已有证据用 save_evidence；随后说明具体阻塞或可续探步骤。不要为通过保护编造事实。保存真实新增后可继续本意图；没有新增则结束本轮，保留未验证范围。"

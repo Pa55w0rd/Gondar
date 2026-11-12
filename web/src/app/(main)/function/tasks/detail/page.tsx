@@ -454,6 +454,14 @@ function TaskDetailInner() {
       </header>
 
       {/* Tab content */}
+      {task.planner_wait && (
+        <div className="mx-4 mt-4 rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-sm lg:mx-6" role="status">
+          <p className="font-medium">等待条件，已有成果已保留</p>
+          <p className="mt-1 text-muted-foreground">{task.planner_wait.reason}</p>
+          <ul className="mt-2 list-inside list-disc text-muted-foreground">{task.planner_wait.remaining_steps.map((step, index) => <li key={index}>{step}</li>)}</ul>
+          <p className="mt-2 text-xs">未验证范围仍未知。条件具备后继续任务，沿用已有证据和执行进度。</p>
+        </div>
+      )}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
           <SessionsTab taskId={id} />

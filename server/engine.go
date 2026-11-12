@@ -1071,9 +1071,11 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		})
 		e.EndLLMCall(t.ID)
 		code := plannerFailureCode(res.err, roundCtx.Err() != nil && ectx.Err() == nil)
-		e.recordPlannerOutcome(ectx, t, int64(round), code)
+		e.recordPlannerOutcome(ectx, t, int64(round), code, res.err)
 		retryWanted = e.shouldRetryIdlePlanner(ectx, t, code)
 		switch {
+		case errors.Is(res.err, agent.ErrPlannerWaiting):
+			log.Printf("[planner] task %s 已交接具体等待条件，保留未验证步骤", t.ID)
 		case res.err != nil && roundCtx.Err() != nil && ectx.Err() == nil:
 			// 规划轮超时（本轮自身的墙钟上限到了，不是任务 deadline）。
 			//
@@ -1426,6 +1428,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	case reason == agent.WorkerReasonIdleStop || errors.Is(err, agent.AbortIdleStop):
 		state = "exhausted"
 		stopReason = "idle_stop"
+	case errors.Is(err, agent.ErrVerificationDelivery):
+		state = "exhausted"
+		stopReason = "verification_delivery_gap"
 	case err != nil:
 		state = "blocked"
 		stopReason = db.IntentStopError

@@ -1357,7 +1357,7 @@ WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, s.e
 func (s *ExplorationStore) HasOpenGoal() (bool, error) {
 	var exists bool
 	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM exploration_nodes
-WHERE exploration_id=$1 AND kind='goal' AND state='open')`, s.expID).Scan(&exists)
+WHERE exploration_id=$1 AND kind='goal' AND (state='open' OR (state='met' AND NOT `+provenGoalSQL+`)))`, s.expID).Scan(&exists)
 	return exists, err
 }
 
@@ -1534,7 +1534,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 		) latest_activity ON true
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) AS total,
-			       COUNT(*) FILTER (WHERE state='met') AS met
+			       COUNT(*) FILTER (WHERE ` + provenGoalSQL + `) AS met
 			FROM exploration_nodes
 			WHERE exploration_id=task.exploration_id AND kind='goal'
 		) goal_metrics ON true
@@ -1588,7 +1588,7 @@ func (d *DB) GoalCountsAll() (map[int64]GoalCounts, error) {
 	rows, err := d.Query(`
 		SELECT exploration_id,
 		       COUNT(*) AS total,
-		       COUNT(*) FILTER (WHERE state = 'met') AS met
+		       COUNT(*) FILTER (WHERE ` + provenGoalSQL + `) AS met
 		FROM exploration_nodes
 		WHERE kind = 'goal'
 		GROUP BY exploration_id`)

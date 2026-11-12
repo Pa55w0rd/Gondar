@@ -35,7 +35,7 @@ func TestValidateDSLRejectsBadCidr(t *testing.T) {
 	}
 }
 
-// cidr 生成的 SQL 必须用 inet 包含运算（>>=），且对非 IP 的 ip 值安全
+// 主机地址属于网段，左侧IP必须使用被包含运算（<<=），且非IP值安全。
 // （try_inet 返回 NULL 而不是抛 22P02）。
 func TestBuildDSLWhereCidrUsesInetContainment(t *testing.T) {
 	node, err := ParseDSL("cidr=10.10.0.0/16")
@@ -46,8 +46,8 @@ func TestBuildDSLWhereCidrUsesInetContainment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(where, "try_inet(ip)") || !strings.Contains(where, ">>=") {
-		t.Errorf("where=%q 应当用 try_inet(ip) >>= 网段", where)
+	if !strings.Contains(where, "try_inet(ip)") || !strings.Contains(where, "<<=") {
+		t.Errorf("where=%q 应当用 try_inet(ip) <<= 网段", where)
 	}
 	if len(args) != 1 || args[0] != "10.10.0.0/16" {
 		t.Errorf("args=%v 应当只有一个网段参数", args)

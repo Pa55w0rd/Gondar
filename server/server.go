@@ -45,6 +45,7 @@ type Server struct {
 	m                    *Manager
 	engine               *Engine
 	ctx                  context.Context
+	runtimeCancel        context.CancelFunc
 	reportRecoveryCancel context.CancelFunc
 
 	skillDir string       // root directory for skill subdirectories
@@ -161,11 +162,16 @@ type triggeredRun struct {
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
+	ctx, runtimeCancel := context.WithCancel(ctx)
+	if m.backgroundCtx != nil {
+		stop := context.AfterFunc(m.backgroundCtx, runtimeCancel)
+		context.AfterFunc(ctx, func() { stop() })
+	}
 	key, err := loadOrCreateJWTKey(keyDir, dataDir)
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, keyDir: keyDir, dataDir: dataDir, chatBusy: map[string]bool{},
+	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, runtimeCancel: runtimeCancel, skillDir: skillDir, keyDir: keyDir, dataDir: dataDir, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
@@ -299,6 +305,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 func (s *Server) Close() {
 	if s == nil {
 		return
+	}
+	if s.runtimeCancel != nil {
+		s.runtimeCancel()
 	}
 	if s.reportRecoveryCancel != nil {
 		s.reportRecoveryCancel()

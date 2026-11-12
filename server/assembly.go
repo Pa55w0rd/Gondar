@@ -283,6 +283,9 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	if err := pg.UpgradeWorkerFactReader(); err != nil {
 		log.Printf("[tools] 事实读取工具默认绑定升级失败: %v", err)
 	}
+	if err := refreshExecutionToolContracts(pg); err != nil {
+		log.Printf("[tools] 执行工具契约升级失败: %v", err)
+	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability
 	// is still gated by the global capture switch (hostTools() returns them only when

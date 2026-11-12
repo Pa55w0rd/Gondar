@@ -5,6 +5,7 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+	planner_wait?: { kind: "missing_prerequisite" | "environment_blocked" | "no_executable_candidates"; reason: string; verification_ids: string[]; remaining_steps: string[] };
 	completion_mode?: "objective" | "continuous";
 	timeout_seconds?: number;
   id: string;
@@ -467,6 +468,9 @@ export interface ExplorationNodeQuery {
 
 // 目标管理卡片用的目标(后端已把 payload 拆成 text/vulnclass)。
 export interface TaskGoal {
+	proof_status?: "pending" | "unknown" | "unverified" | "proved";
+	unverified?: boolean;
+	unverified_reason?: string;
   id: string;
   text: string;
   vulnclass?: string;

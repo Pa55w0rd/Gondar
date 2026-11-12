@@ -42,7 +42,11 @@ jobs:
         # -p 1: 连 PG 的测试包不止持有跨包 advisory lock 的 db/agent/server 三个
         # (llmrec/evidence/traffic 等无锁),CI 多核并行时与 agent 包写事务死锁
         # (SQLSTATE 40P01,两轮稳定复现)。串行跑包与 TestMain 的锁设计意图一致。
-        run: go test -p 1 ./... -count=1
+        env:
+          GONDAR_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+        # Each package receives a fresh DB so notification outboxes, fake model
+        # settings and tool bindings cannot leak into the next package.
+        run: bash ./scripts/test-postgres.sh
       - name: Local proxy certificate identity regression
         # 根 ./... 不进入带独立 go.mod 的 third_party；仅运行本地纯身份回归。
         run: go test github.com/lqqyt2423/go-mitmproxy/proxy -run '^TestGondarCertificateNameUsesConnectionLocalConnectFallback$' -count=1

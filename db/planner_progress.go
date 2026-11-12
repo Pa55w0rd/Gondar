@@ -31,7 +31,7 @@ UNION
 SELECT 'case:'||COALESCE(v->>'id','')||':'||COALESCE(v->>'content_digest','') FROM latest_verification
 WHERE v->>'progress'='true'
 ) SELECT
-count(*) FILTER (WHERE kind='goal' AND state='open'),
+	count(*) FILTER (WHERE kind='goal' AND (state='open' OR (state='met' AND NOT `+provenGoalSQL+`))),
 count(*) FILTER (WHERE kind='intent' AND state IN ('open','running')),
 coalesce(max(id) FILTER (WHERE kind='intent' AND state<>'deleted'),0),
 coalesce(max(id) FILTER (WHERE kind='finding'),0),

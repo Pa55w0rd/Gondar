@@ -31,6 +31,8 @@ func plannerFailureCode(err error, roundTimedOut bool) string {
 		return "planner_model_unavailable"
 	case errors.Is(err, agent.ErrPlannerNoProgress):
 		return "planner_no_progress"
+	case errors.Is(err, agent.ErrPlannerWaiting):
+		return "planner_waiting"
 	case errors.Is(err, agent.ErrPlannerReadLoop):
 		return "planner_read_loop"
 	case errors.Is(err, agent.ErrToolFailureLoop):
@@ -40,7 +42,7 @@ func plannerFailureCode(err error, roundTimedOut bool) string {
 	}
 }
 
-func (e *Engine) recordPlannerOutcome(ctx context.Context, t *Task, round int64, code string) {
+func (e *Engine) recordPlannerOutcome(ctx context.Context, t *Task, round int64, code string, runErrors ...error) {
 	if ctx.Err() != nil {
 		return // user pause/shutdown/task deadline never counts as a planner failure
 	}
@@ -57,6 +59,21 @@ func (e *Engine) recordPlannerOutcome(ctx context.Context, t *Task, round int64,
 	}
 	if code == "planner_model_timeout" {
 		summary = "模型调用达到配置时限，本轮规划未完成：" + code
+	}
+	if code == "planner_waiting" {
+		var wait *agent.PlannerWaitError
+		for _, runErr := range runErrors {
+			if errors.As(runErr, &wait) {
+				break
+			}
+		}
+		if wait == nil || wait.Wait.Validate(ctx, t.Store) != nil || !wait.Wait.Current(ctx, t.Store) {
+			t.Notify()
+			return
+		}
+		e.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: "规划已交接等待条件，保留未完成范围", Metadata: metadata})
+		e.pauseForPlannerWait(ctx, t, wait.Wait)
+		return
 	}
 	e.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: summary, IsError: code != "" && code != "task_deadline", Metadata: metadata})
 	if code == "task_deadline" {

@@ -111,7 +111,8 @@ VALUES ($1,'goal','{}','met'), ($1,'goal','{}','open')`, task.ExplorationID); er
 	if metrics.LastActivity != latestAt.Unix() {
 		t.Fatalf("last activity=%d, want %d", metrics.LastActivity, latestAt.Unix())
 	}
-	if metrics.Goals.Total != 2 || metrics.Goals.Met != 1 {
+	// A legacy met flag without a proof does not establish goal completion.
+	if metrics.Goals.Total != 2 || metrics.Goals.Met != 0 {
 		t.Fatalf("unexpected goal metrics: %+v", metrics.Goals)
 	}
 }

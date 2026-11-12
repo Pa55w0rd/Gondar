@@ -50,7 +50,7 @@ func (t *ToolSet) recordVerification() actool.CoreTool {
 			"negative需要正常baseline、实际test和control对照；confirmed需要baseline、test和真实impact，并明确prerequisites_met=true。"+
 			"这里只记录验证事实，不代替report_finding创建漏洞。缺账号、WAF/限流、超时、会话失效应保留受阻/不确定。"+
 			"首次返回稳定id和revision=1；更新前list_verifications(id)取最新expected_revision。旧修订保留，相同观察/证据含义重试或仅时间变化不算进展；改变已证实/阴性结论必须解释change_reason。",
-		obj(map[string]any{
+		verificationInputSchema(obj(map[string]any{
 			"target":            verificationTargetSchema(),
 			"state":             map[string]any{"type": "string", "enum": []string{"not_tested", "blocked", "missing_prerequisite", "negative", "confirmed", "inconclusive"}},
 			"summary":           str("简短展示摘要；不靠修改标题制造新进展"),
@@ -69,7 +69,7 @@ func (t *ToolSet) recordVerification() actool.CoreTool {
 			"expected_revision":     idp("首次可省略/0；修改已有记录必须传最新revision，相同内容重试保持幂等"),
 			"change_reason":         str("改变已有证实或阴性结论时解释原因；旧证据继续保留"),
 			"observed_at":           str("可选RFC3339观察时间；仅刷新时间不新增修订或刷新进展"),
-		}, "target", "state", "summary"),
+		}, "target", "state", "summary")),
 		func(ctx context.Context, input json.RawMessage) (actool.Result, error) {
 			var in db.VerificationUpdate
 			if err := json.Unmarshal(input, &in); err != nil {
@@ -86,7 +86,7 @@ func (t *ToolSet) recordVerification() actool.CoreTool {
 			}
 			result, err := t.ts.UpsertVerification(ctx, in, t.worker)
 			if err != nil {
-				return actool.Errorf(fmt.Sprintf("验证记录未更改：%v", err)), nil
+				return verificationRepairResult(in.State, err), nil
 			}
 			if result.Changed && result.Record.Progress {
 				t.writes.Facts++
@@ -97,6 +97,7 @@ func (t *ToolSet) recordVerification() actool.CoreTool {
 				}
 			}
 			return jsonResult(map[string]any{
+				"saved": true, "receipt_type": "verification",
 				"changed": result.Changed, "id": result.Record.ID, "node_id": result.Record.NodeID,
 				"revision": result.Record.Revision, "previous_node_id": result.Record.PreviousNodeID,
 				"content_digest": result.Record.ContentDigest, "state": result.Record.State,

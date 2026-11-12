@@ -563,7 +563,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   </div>
                 ) : (
                   <div key={g.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
-                    <StatusBadge domain="goal" value={g.state} />
+                    {g.state === "met" && g.proof_status && g.proof_status !== "proved" ? <span className="text-amber-600 text-xs" title={g.unverified_reason || "历史目标缺少逐项证明，需核对已有材料"}>待核对</span> : <StatusBadge domain="goal" value={g.state} />}
                     <span className="min-w-0 flex-1 break-words">{g.text}</span>
                     {g.vulnclass && (
                       <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-muted-foreground text-xs">

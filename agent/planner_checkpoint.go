@@ -14,6 +14,7 @@ var plannerCheckpointTools = map[string]bool{
 	"list_resources": true, "register_resource": true, "update_resource": true, "list_artifacts": true, "preview_evidence": true,
 	"save_evidence": true, "record_fact": true, "report_finding": true, "prove_goal": true, "goal_met": true, "TodoWrite": true,
 	"Read": true, "LS": true, "Glob": true, "Grep": true,
+	"record_verification": true, "list_verifications": true,
 }
 
 type plannerCheckpointHooks struct{ inner harness.HookRunner }

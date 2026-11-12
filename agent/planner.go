@@ -355,7 +355,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
    - **否定/存疑观察**只约束实际测试的端点、输入、身份、表示法和时点。先看node_detail的证据及list_verifications当前格；证据不足或只有一次401/403/空响应时保留未验证缺口。同格同方法且没有新信息时不要重复；有真实新证据、不同输入/身份/方法或环境变化时可限量复核，不能将一次阴性扩成整个接口或整类安全。
-   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（DSL 搜索、type 过滤、分页，或 id/ids 直取；找「已登记但还没测」的资产用 list_untested_assets 更省事）。资产全局共享，别默认拉全量。
+   - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（登记材料分页，默认20，按has_more/next_before继续）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（DSL 搜索、type 过滤、分页，或 id/ids 直取；找「已登记但还没测」的资产用 list_untested_assets 更省事）。资产全局共享，别默认拉全量。
 
 2. **核对目标与完成策略**：goals 字段已含目标及状态；对已有真实证据的单项交付可用 prove_goal 标 met。整个任务能否结束由宿主 completion_mode 决定：持续挖掘模式保留单项目标证明并继续处理未验证方向；目标达成模式才会在全部目标证明后完成。已有发现数量、零漏洞清单、缺账号或主要接口401不能替代范围和覆盖核验。
    - **量化验收核对**：prove_goal前核对真实交付与证据。coverage.pct仅是资产被fact锚定比例，findings_total仅是登记数，都不能证明所有端点、输入、身份或对照已验证；完整覆盖需核对verification各格及未登记面。缺前提/被防护阻断/不确定仍是未验证。不得为凑数量或比例编造结论，也不要求必须出现漏洞才允许如实记录阴性。
@@ -372,11 +372,12 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
      · **done（本轮正常结束）**：只说明本轮结束，是否完成验证看实际证据。done且零yields是交付缺口，先核对工具回执/停止原因，不直接判安全或方向无价值；保留已执行操作，前置齐全且仍有具体未验证步骤时再恢复或接续，不从头盲目重放。
      · **exhausted（中途收场）**：**分两种，含义完全相反，必须看 stop_reason 区分**：
        — stop_reason为idle_stop或旧文案「无增量」只证明运行保护停止，不证明目标不存在漏洞。核对最后工具、阶段证据与前置条件；保留blocked/inconclusive，允许基于实质新信息接续。没有新信息就停止相同循环，不把预算或环境失败写成已排除。
+       — stop_reason为verification_delivery_gap表示记账交付没有成功：先核对已有回执、事实和附件，只补交付或记录不确定，不重放已经执行的目标操作，也不把它当阴性。
        — stop_reason 含「步数上限 / 运行超时」= **还有明确的下一步，只是没时间** → 可以接续，但必须满足下面的接续纪律。
        — blocked（模型或网络失败）= 纯外部故障没跑成 → 直接重派同方向。
        **两种 exhausted 都要先用 get_worker_trace / get_worker_output 看它实际做到哪、卡在哪**，再决定是「接上次进度继续」还是「换打法/换方向」：接近突破被掐 → 接续；每次卡在同一处 → 这条路本身不通，换打法。依据永远是 trace 里的真实进度，不是 state 本身。
    - **接续纪律（避免接续链无限拉长）**：
-     · 接续是**有代数上限的**（最多接 3 次，超了 add_intent 会被直接拒绝）。一条方向接了 3 次还没结果，说明问题不在「时间不够」而在「这条路本身不通」或「打法不对」——此时该换打法或换方向，不该再接。
+      · 接续只限制**连续没有新证据**的重复续派；有实质新证据可继续，不设总链深上限。保护停止、写入失败或预算耗尽都不能证明方向不存在漏洞。先读取实际回执和未完成步骤，再决定恢复或接续。
      · **接续必须带增量承诺**：summary 里写清「上次做到 X，本次要拿到 Y；拿不到 Y 就收手」。写不出具体的 Y，说明你也不知道接下去能拿什么——那就别接。
      · **接续要把 continues 字段填上**（上游意图 id），否则接续关系只存在于文字里、代数算不出来、也查不了。
      · 接续优先【带着新信息接】而不是【从头接】：上次已确认的结论要在 summary 里引用（fact id），别让新 worker 把已知的再探一遍。
@@ -395,11 +396,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 5. **提交**：用【一次】add_intent 批量提交筛出的新方向（intents 数组，最多 4 个最高价值的，不要逐条多次调）：
    - **summary**：一句话自然语言描述该方向（测试目标完整地址 + 做什么 + 为什么），不套固定分类；去重主要靠它与已有意图比对。
    - **asset_ids**：本方向要测试/攻击的目标资产 id（尽量传，0/1/多个，来自 list_assets）——只要方向围绕具体资产（站点/接口/参数/主机）就务必传，用于覆盖去重、连入资产链路，跨多资产就都传；纯全局侦察无具体资产才留空。
-   - **parent_ids**：本方向由哪些上游节点综合得出（可选，0/1/多个）——多个事实结合产生一个意图就都传，派生自某上游意图/发现也传其 id，顶层全新方向留空。
+   - **parent_ids**：只填写上游已确认fact/finding节点的ID数组；上游意图ID应放入continues数组，不能填parent_ids。顶层全新方向留空。
    - **priority**（0-10，决定 worker 领单顺序，frontier 按它降序）：**别全默认 5**。评分按四个可核对维度加权（v0.4.30，TDA 难度感知评分，借鉴 Excalibur 论文四维、自译）：
      ① **视野**（离目标还差几步）：已是最后一步=9-10；还需两步=7-8；方向未定=≤5；
      ② **证据置信**（依据的 fact 可靠度）：observed=高分、inferred=中、纯猜测=低（降 2-3 分）；
-     ③ **历史成功率**：同类方向/同类资产在本任务里 done 且零产出的占比高 → 降 2-3 分（别把资源再倒进已证明没东西的面）；
+     ③ **历史证据**：只有前提有效、实际执行并有充分对照的阴性格才对相同条件降权；done零产出、记账失败、受阻和不确定都是交付或验证缺口，不能当成已证明安全；
      ④ **上下文负载**：需要大量既有事实才能起步的长链方向适当降分，优先短链快验。
      同轮多意图按价值区分，高价值链不与补测意图同权排队。
    - **hypothesis / success_criteria**（可选但强烈建议）：hypothesis=本方向的假设（依据哪条 fact 的什么推测，引用 fact id）；success_criteria=怎么算成了/没成（期望拿到的 fact/finding 形态）。写得出来，worker 就有了 definition of done，你下轮判「有没有产出」也有了对照锚。
@@ -492,7 +493,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir) + completionGuidance(mode)
+	sysBody := plannerSystem(goal, p.workDir, taskDir) + completionGuidance(mode) + verificationReceiptGuidance + plannerDecisionGuidance
 	if tc.Final {
 		sysBody += "\n【本轮是有限收尾】当前不是探索阶段；只读取已有材料、保存事实/证据和交接，不派发新意图、不请求目标。持续模式也遵守此阶段边界。"
 	}
@@ -534,6 +535,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		BashEnv:               proxyEnv(p.proxyAddr, p.proxyCACert), // Bash 子命令默认走代理+信任 CA
 		WorkingDir:            taskDir,                              // 本任务工作目录 <workDir>/tasks/<taskID>
 		ToolOutputDir:         cmdOutDir(taskDir),
+		MaxToolOutputChars:    workerToolOutputChars,
 		MaxTurns:              plannerTurnBudget(p.maxTurns),
 		MaxDuration:           maxDur,
 		Compaction:            compactionConfig(p.compactionWindow()),
@@ -558,7 +560,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			return false, "", progressErr
 		}
 		if (before.OpenGoals > 0 || mode == db.CompletionContinuous) && before.ActiveIntents == 0 {
-			progress = &plannerProgressGuard{inner: opts.Hooks, store: ts, before: before, goalMet: func() bool { return tsx.GoalMet }, continuous: mode == db.CompletionContinuous}
+			progress = &plannerProgressGuard{inner: opts.Hooks, store: ts, before: before, goalMet: func() bool { return tsx.GoalMet }, continuous: mode == db.CompletionContinuous, wait: func() *PlannerWait { return tsx.plannerWait }}
 			opts.Hooks = progress
 		}
 	}
@@ -612,8 +614,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			if progress != nil && r.Kind == "result" && !r.IsError && ctx.Err() == nil {
 				if validationErr := progress.validate(ctx); validationErr != nil {
 					progressErr = validationErr
-					r.IsError = true
+					r.IsError = !errors.Is(validationErr, ErrPlannerWaiting)
 					r.Summary = "规划未落地：纠偏后仍没有实际动作"
+					if errors.Is(validationErr, ErrPlannerWaiting) {
+						r.Summary = "规划已交接等待条件，未验证范围保留"
+					}
 					r.Detail = validationErr.Error() + "\n\n模型原输出（未作为成功回执）：\n" + r.Detail
 				}
 			}
@@ -625,7 +630,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 				emit(r)
 			}
 		})
-	if err == nil {
+	if errors.Is(progressErr, ErrPlannerWaiting) {
+		err = progressErr
+	} else if err == nil {
 		err = progressErr
 	} else if terminalReason == harness.ReasonModelError && ctx.Err() == nil {
 		err = errors.Join(ErrPlannerModelError, err)
