@@ -19,7 +19,7 @@ import (
 	"gondar/intercept"
 )
 
-const plannerRunDuration = 5 * time.Minute
+const plannerRunDuration = 20 * time.Minute
 const plannerSettlementGrace = time.Minute
 const plannerFinalRunDuration = 2 * time.Minute
 
@@ -45,7 +45,7 @@ type Planner struct {
 	window            int                                    // context window in tokens (for compaction)
 	windowFn          func() int                             // optional dynamic task-chain minimum
 	maxTurns          int                                    // configured max turns; nonpositive uses 24
-	runTimeout        time.Duration                          // configured main budget; capped at five minutes
+	runTimeout        time.Duration                          // configured main budget; 0 = unlimited
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
 	attributions      func() map[string]any                  // Guard 归因读取（nil = 概览不带 guard_attributions 块）
@@ -62,7 +62,7 @@ type Planner struct {
 }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
-	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns}
+	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, runTimeout: plannerRunDuration}
 }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
@@ -70,17 +70,19 @@ func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 func (p *Planner) SetRunTimeout(d time.Duration) { p.runTimeout = d }
 
 func (p *Planner) runDuration() time.Duration {
-	if p.runTimeout > 0 && p.runTimeout < plannerRunDuration {
-		return p.runTimeout
-	}
-	return plannerRunDuration
+	return max(0, p.runTimeout)
 }
 
 // RoundLimit includes a bounded grace period for persisting already known work.
-func (p *Planner) RoundLimit() time.Duration { return p.runDuration() + plannerSettlementGrace }
+func (p *Planner) RoundLimit() time.Duration {
+	if budget := p.runDuration(); budget > 0 {
+		return budget + plannerSettlementGrace
+	}
+	return 0
+}
 
 func (p *Planner) finalRunDuration() time.Duration {
-	if configured := p.runDuration(); configured < plannerFinalRunDuration {
+	if configured := p.runDuration(); configured > 0 && configured < plannerFinalRunDuration {
 		return configured
 	}
 	return plannerFinalRunDuration
@@ -343,7 +345,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 任务目标：{{.Goal}}
 
 **本轮该产出几个意图（先想清楚这条）**：
-- **硬底线（最高优先）**：只要【目标未达成】且【当前没有任何 open 或 running 意图】（frontier_open=0 且 running_intents 为空），本轮就【必须】产出至少一个向目标推进的意图——没有在跑的 work 可等、也没有在排队的方向时，产出 0 意图=任务停摆；哪怕已知方向都只在 recent_done 里，也要据下面 done/exhausted/blocked 的判断另开一条或续派一条。
+- **可执行前沿**：目标未达成且没有 open/running 意图时，先核对范围内未验证面与前置条件。有真实可执行、未重复的方向就必须提交意图；确实缺少账号、环境或必要证据时，保存具体阻塞与待补条件并保留未验证状态，不编造意图凑派发、不用旧目标met掩盖缺口。
 - 硬底线之外，**产出 0 个意图是正常结果，但要有正当理由**（不是"少派更稳"的默认）：①**已覆盖**——你想到的方向都已被仍在 open/running 的意图处理（换措辞重复生成已存在的意图是严重错误）；②**等待依赖**——下一步依赖当前在跑 work 的产出、而它还没出来（此时硬派会让下游拿不到前置而空转，应等下次唤醒图更新后再派）。
 - 反过来：确有【未覆盖、且不依赖在跑 work】的新方向，或目标未达成且范围内仍有未测面，就该派——别把 0 意图当偷懒的默认。
 
@@ -352,11 +354,11 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 1. **完整态势已附在本提示下方**（就是 graph_overview 的返回，无需再调它）：task（原始标题+目标/根节点）、goals+状态、open/running/recent_done 意图、frontier_open、facts（探索事实数，与漏洞是两类）、findings_total、recent_facts（{id,summary,confidence?}）、finding_list、recent_done_intents、coverage（有覆盖度统计时）、stall（收官态势）、cold_digests（冷区折叠摘要，expand_digest 展开）、guard_attributions（工具调用归因计数：blocked 高=目标在防——WAF/拦截规则在打回，继续同款打法是烧 token，换向量/换手段/先写意图明确绕行思路；error 高=工具或环境在坏，先诊断再派）。
    - **范围**：探索节点（goals/意图/facts/findings）只含本任务；**资产图全局共享**（多任务同一份，资产计数是全局在范围内的、非本任务独有）——出现非本任务相关的资产时忽略。
    - **血缘**：每个意图带 parents（上游：派生自哪些事实/意图）和 yields（下游：产生了哪些事实/发现），recent_facts 每条带 from_intent；据此理解"哪些事实来自哪个方向、能否综合出新方向"。
-   - **否定/存疑观察**（recent_facts 里"端口关闭/不可注入"等）是 worker 的观察、不是定论：采信前先 node_detail(id) 看 evidence——evidence 扎实、confidence=observed 且手段已穷尽的才视为该方向暂时封住；evidence 缺失、只是"看起来像/只探一次"、或 confidence=inferred 的，按【尚未探明】处理，若在范围内且无其它意图覆盖，默认派一条复核意图去证实或推翻（**同一否定方向至多复核一次**；复核后仍为否定、且证据合理，就尊重该结论、不再派）。
+   - **否定/存疑观察**只约束实际测试的端点、输入、身份、表示法和时点。先看node_detail的证据及list_verifications当前格；证据不足或只有一次401/403/空响应时保留未验证缺口。同格同方法且没有新信息时不要重复；有真实新证据、不同输入/身份/方法或环境变化时可限量复核，不能将一次阴性扩成整个接口或整类安全。
    - **要更深细节才按需调**：list_facts（分页，最新在前，默认 20，可 q 过滤、before 翻页，带 total/has_more）、list_findings（全部漏洞）、node_detail(id)（完整证据/详情；列表/recent_facts 只给摘要）、list_assets（DSL 搜索、type 过滤、分页，或 id/ids 直取；找「已登记但还没测」的资产用 list_untested_assets 更省事）。资产全局共享，别默认拉全量。
 
 2. **核对目标与完成策略**：goals 字段已含目标及状态；对已有真实证据的单项交付可用 prove_goal 标 met。整个任务能否结束由宿主 completion_mode 决定：持续挖掘模式保留单项目标证明并继续处理未验证方向；目标达成模式才会在全部目标证明后完成。已有发现数量、零漏洞清单、缺账号或主要接口401不能替代范围和覆盖核验。
-   - ⚠️ **量化验收核对（严禁提前盖章）**：目标含可量化条件（覆盖度达 X%、拿 N 个 flag、获得某权限）时，prove_goal 前【必须】核对上方 graph_overview 的实测值（coverage.pct、findings_total 计数等）：未达标就【禁止】prove_goal，改派意图补差；不得以"大体达成/核心已拿下"为由提前标 met。例：要求覆盖度 100% 而实测 coverage.pct=40% → 未达成，继续派补测意图。
+   - **量化验收核对**：prove_goal前核对真实交付与证据。coverage.pct仅是资产被fact锚定比例，findings_total仅是登记数，都不能证明所有端点、输入、身份或对照已验证；完整覆盖需核对verification各格及未登记面。缺前提/被防护阻断/不确定仍是未验证。不得为凑数量或比例编造结论，也不要求必须出现漏洞才允许如实记录阴性。
    - **无进展与阻塞**：只引用宿主实际提供的时间、产出和在跑状态，不编造停滞时长。仍有可执行、未重复、范围内的方向时继续提交少量意图；无可执行方向时如实列出阻塞，由宿主有限保护暂停/停止。结束当前规划轮直接输出小结，不调用 goal_met；不能为减少token把未完成任务声称为已完成。
 
 3. **（可选，仅开局、极轻量）探测理解**：仅当图里几乎还没有 fact（recent_facts 基本为空、任务刚开始）、仅凭态势无法把初始意图说具体时，才用 Bash 等对目标做极少量、只读的探测（如 1–2 次 curl 看首页/指纹）。**唯一合法产物是一句更精准的意图描述**——绝不是漏洞的发现/验证/利用，也不是端点/目录/参数的枚举结果（那些是 worker 的活，写成意图派下去）。三条硬边界：
@@ -367,9 +369,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 4. **决定补哪些新方向**：**这里的"克制"只指【不重复已存在的意图】，不是"能少派就少派"**——目标未达成时，默认追问是"为逼近目标，还有哪些更深、更狠、尚未覆盖的打法"，而不是"是否可以收尾"。意图是【开放的探索方向】（不是固定类型/菜单），结合已知事实、资产、目标自判方向，逐一与 open + running + recent_done 比对：
    - 已有 open/running 覆盖 → 不再生成（正在处理）。
    - 在 recent_done 里出现过 → **先看该意图的 state 与 stop_reason（每条都带）分辨怎么停的，再决定**：
-     · **done（正常跑完）**：已覆盖 → 不原样重派；是否死路看它 yields 出的 fact 结论、而非 state。**特例：done 且零 yields（一条 fact 都没写回）= 被空转收场，与 exhausted-无增量同处理——方向无增量，不要接续、不要原样重派**。
+     · **done（本轮正常结束）**：只说明本轮结束，是否完成验证看实际证据。done且零yields是交付缺口，先核对工具回执/停止原因，不直接判安全或方向无价值；保留已执行操作，前置齐全且仍有具体未验证步骤时再恢复或接续，不从头盲目重放。
      · **exhausted（中途收场）**：**分两种，含义完全相反，必须看 stop_reason 区分**：
-       — stop_reason 含「产出率已归零 / 无增量」= **worker 探到边界了，这个方向本身没东西了** → **不要接续**，换方向；接续它只是让一个空方向再空转一轮。
+       — stop_reason为idle_stop或旧文案「无增量」只证明运行保护停止，不证明目标不存在漏洞。核对最后工具、阶段证据与前置条件；保留blocked/inconclusive，允许基于实质新信息接续。没有新信息就停止相同循环，不把预算或环境失败写成已排除。
        — stop_reason 含「步数上限 / 运行超时」= **还有明确的下一步，只是没时间** → 可以接续，但必须满足下面的接续纪律。
        — blocked（模型或网络失败）= 纯外部故障没跑成 → 直接重派同方向。
        **两种 exhausted 都要先用 get_worker_trace / get_worker_output 看它实际做到哪、卡在哪**，再决定是「接上次进度继续」还是「换打法/换方向」：接近突破被掐 → 接续；每次卡在同一处 → 这条路本身不通，换打法。依据永远是 trace 里的真实进度，不是 state 本身。
@@ -427,7 +429,12 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if tc.Final {
 		roundLimit = p.FinalRoundLimit()
 	}
-	ctx, cancel := context.WithTimeoutCause(ctx, roundLimit, AbortRunHardTimeout)
+	var cancel context.CancelFunc
+	if roundLimit > 0 {
+		ctx, cancel = context.WithTimeoutCause(ctx, roundLimit, AbortRunHardTimeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 	mode, err := ts.TaskCompletionMode(ctx)
 	if err != nil {
@@ -447,6 +454,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
 	tsx := NewToolSet(ts, "planner")
+	tsx.SetNotifyProgress(ProgressNotifyFromContext(ctx))
 	tsx.SetFindingRecorder(p.findingRecorder)
 	tsx.SetArtifactRecorder(p.artifactRecorder)
 	if as != nil {
@@ -571,14 +579,22 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 心跳/无变动唤醒时,若全图已无任何 open 或 running 意图 → 探索已停摆(没 worker 在跑、
 		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。
 		if active, err := ts.HasActiveIntent(); err == nil && !active {
-			lead = "本轮是**定时巡检（心跳到点）**的唤醒,且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向,探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图(不得产出 0 意图);先据下面的态势判定目标是否已达成,未达成则立即补方向："
+			if mode == db.CompletionContinuous {
+				lead = "本轮是**持续挖掘的定时巡检/恢复唤醒**，当前没有待执行或运行中的意图。保留已有目标证明，即使旧目标全部met也继续核对原授权范围内尚未验证的方向；有前置条件齐全、未重复的方向就真实调用add_intent提交。没有可执行方向则说明具体阻塞，交由宿主保护停止，不重复证明旧目标、不以文字冒充派发："
+			} else {
+				lead = "本轮是定时巡检唤醒，当前没有open/running意图。先核对真实目标证据和未验证面；有前置齐全、未重复的方向就提交意图，缺前提则保存具体阻塞，不编造派发或安全结论："
+			}
 		}
 	}
 	// 硬底线在 system 顶部已完整声明（最高优先），user 里只压成一句提醒——
 	// 整段重复每轮多烧 ~200 token 且两处措辞会日久漂移（体检 B8）。
-	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。硬底线提醒见 system 顶部：目标未达成且 frontier_open=0 且无 running 意图时，本轮必须产出意图。" +
+	input := lead + situational + "\n\n据上面的态势核对目标和完成策略。仅对尚未证明、已有真实证据的单项目标使用 prove_goal；旧目标met不重复证明。持续挖掘按原范围继续未验证方向，不能因旧目标met结束。硬底线提醒见 system 顶部：没有待执行或运行中的意图时，提交真实可执行进展，或如实说明具体阻塞。" +
 		renderPlannerHandoff(state) + renderPlannerTodos(todos.List())
-	input += "\n\n【宿主规划预算与回执】主探索最多5分钟，较短的运行配置优先；未配置轮数时最多24轮，随后仅有有限收尾。TodoWrite、生成脚本和文字总结是草稿，不等于已经派发。目标未完成且没有待执行/运行中意图时，必须通过真实 add_intent 等操作提交可执行进展；无法推进应说明阻塞，不得声称已派发。"
+	budgetText := "本轮主探索不设总时长上限，单次模型调用仍受独立超时保护"
+	if maxDur > 0 {
+		budgetText = fmt.Sprintf("本轮主探索最多%s，以当前运行配置及任务剩余时限为准", maxDur.Round(time.Second))
+	}
+	input += fmt.Sprintf("\n\n【宿主规划预算与回执】%s；本轮最多%d轮，随后仅有有限收尾。TodoWrite、生成脚本和文字总结是草稿，不等于已经派发。目标未完成且没有待执行/运行中意图时，必须通过真实 add_intent 等操作提交可执行进展；无法推进应说明阻塞，不得声称已派发。", budgetText, opts.MaxTurns)
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	previousSummary := state.Summary
@@ -619,10 +635,10 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if err == nil && strings.TrimSpace(finalText) != "" {
 		lastSummary = finalText
 	}
-	if err != nil && progress != nil && ctx.Err() == nil {
-		if check := progress.validate(ctx); errors.Is(check, ErrPlannerNoProgress) {
-			lastSummary = previousSummary
-		}
+	// Keep new blockers and observations even when dispatch validation fails.
+	// A handoff is context, not proof that an intent or tool actually executed.
+	if err != nil || ctx.Err() != nil {
+		lastSummary = mergeFailedPlannerHandoff(previousSummary, lastSummary)
 	}
 	outcome := "completed"
 	if err != nil {

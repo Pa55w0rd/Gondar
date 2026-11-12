@@ -48,7 +48,7 @@ func TestPlannerOutcomesSurviveConnectionAndResetOnSuccess(t *testing.T) {
 	if err != nil || count != 2 || code != "planner_repeated_failure" {
 		t.Fatalf("alternating failures bypassed protection: %s %d %v", code, count, err)
 	}
-	appendOutcome("planner_read_loop")
+	appendOutcome("planner_model_timeout")
 	code, count, err = s.PlannerFailureStreak(t.Context())
 	if err != nil || count != 3 || code != "planner_repeated_failure" {
 		t.Fatalf("mixed third failure not counted: %s %d %v", code, count, err)

@@ -6,6 +6,144 @@ import (
 	"testing"
 )
 
+func TestContinuationStopsRepeatedEvidenceButAllowsNewContent(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	task, err := d.CreateTask("continuation bounded evidence", "synthetic only", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.DeleteTask(task.ID) })
+	s := d.Exploration(task.ExplorationID)
+	id, err := s.AddIntent(map[string]any{"summary": "start"}, 5, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= maxUnproductiveContinuations+1; i++ {
+		fact, err := s.AddNode(KindFact, map[string]any{"summary": "same observation", "evidence": "same local output"}, 5, "confirmed", "test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Link(id, RelYields, fact); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.SetIntentState(id, "exhausted"); err != nil {
+			t.Fatal(err)
+		}
+		next, err := s.AddIntent(map[string]any{"summary": fmt.Sprintf("next %d", i), "continues": []int64{id},
+			"continuation_no_progress": -100, "continuation_depth": 1}, 5, nil, "test")
+		if i == maxUnproductiveContinuations+1 {
+			if err == nil || next != 0 {
+				t.Fatal("重复内容伪装成新节点绕过无进展保护")
+			}
+			// A real new observation on the same source must permit the next step.
+			fresh, ferr := s.AddNode(KindFact, map[string]any{"summary": "new observation", "evidence": "different local proof"}, 5, "confirmed", "test", nil)
+			if ferr != nil {
+				t.Fatal(ferr)
+			}
+			if ferr = s.Link(id, RelYields, fresh); ferr != nil {
+				t.Fatal(ferr)
+			}
+			if _, ferr = s.AddIntent(map[string]any{"summary": "verify new proof", "continues": []int64{id}}, 5, nil, "test"); ferr != nil {
+				t.Fatalf("真实新内容没有解除停滞：%v", ferr)
+			}
+			return
+		}
+		if err != nil {
+			t.Fatalf("第%d轮被过早拦截：%v", i, err)
+		}
+		id = next
+	}
+}
+
+func TestContinuationSameSourceCannotReplayUnchangedTerminalBranch(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	task, err := d.CreateTask("continuation no replay", "synthetic only", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.DeleteTask(task.ID) })
+	s := d.Exploration(task.ExplorationID)
+	parent, err := s.AddIntent(map[string]any{"summary": "source"}, 5, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetIntentState(parent, "exhausted"); err != nil {
+		t.Fatal(err)
+	}
+	add := func() (int64, error) {
+		return s.AddIntent(map[string]any{"summary": "next", "continues": []int64{parent}}, 5, nil, "test")
+	}
+	child, err := add()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.SetIntentState(child, "done"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = add(); err == nil {
+		t.Fatal("同源证据未变仍可反复从旧父节点重放")
+	}
+	proof, err := s.AddNode(KindFact, map[string]any{"summary": "new source result", "evidence": "new proof"}, 5, "confirmed", "test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Link(parent, RelYields, proof); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = add(); err != nil {
+		t.Fatalf("来源有新结果仍被旧分支卡住：%v", err)
+	}
+}
+
+func TestContinuationDeepProgressChainHasNoFixedDepthCap(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	task, err := d.CreateTask("continuation deep progress", "synthetic only", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.DeleteTask(task.ID) })
+	s := d.Exploration(task.ExplorationID)
+	parent, err := s.AddIntent(map[string]any{"summary": "start"}, 5, nil, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for depth := 2; depth <= 10; depth++ {
+		proof, err := s.AddNode(KindFact, map[string]any{"summary": fmt.Sprintf("verified step %d", depth), "evidence": fmt.Sprintf("proof %d", depth)}, 5, "confirmed", "test", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = s.Link(parent, RelYields, proof); err != nil {
+			t.Fatal(err)
+		}
+		if err = s.SetIntentState(parent, "exhausted"); err != nil {
+			t.Fatal(err)
+		}
+		parent, err = s.AddIntent(map[string]any{"summary": fmt.Sprintf("next step %d", depth), "continues": []int64{parent}}, 5, nil, "test")
+		if err != nil {
+			t.Fatalf("有进展的%d代被拦截：%v", depth, err)
+		}
+		var stored int
+		if err = d.QueryRow("SELECT (payload->>'continuation_depth')::int FROM exploration_nodes WHERE id=$1", parent).Scan(&stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored != depth {
+			t.Fatalf("代数追踪错误：got=%d want=%d", stored, depth)
+		}
+	}
+}
+
 func TestContinuationChecksLiveStateAndSingleActiveBranch(t *testing.T) {
 	d, err := Open(testDSN(t))
 	if err != nil {

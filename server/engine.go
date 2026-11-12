@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -613,7 +614,7 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 	// 重复调用检测（v0.4.28）：拦截优先级低于 steer 纠偏——先让排队的人类/规划者
 	// 指令说话，再查重复。
 	if h.repeats != nil {
-		if streak, block := h.repeats.observe(name, input); block {
+		if streak, block := h.repeats.observe(name, input); block && name != "TaskOutput" {
 			log.Printf("[work %s] 重复调用拦截：%s 连续第 %d 次完全相同入参", h.label, name, streak)
 			return true, repeatBlockText(streak), nil
 		}
@@ -629,6 +630,9 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 }
 
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	if h.repeats != nil {
+		h.repeats.observeResult(name, input, result, isErr)
+	}
 	if h.inner != nil {
 		h.inner.PostToolUse(ctx, name, input, result, isErr)
 	}
@@ -788,6 +792,7 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
+	ctx = agent.WithProgressNotify(ctx, t.Notify)
 	workers := e.m.Workers()
 	e.deleteMu.RLock()
 	if e.IsDeleting(t.ID) {
@@ -835,20 +840,31 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 //	小时零规划轮、零新意图——「运行中 Worker」恒为 0，任务状态仍是 running
 //	却什么都不干。重启服务立即恢复。
 //
-// 主探索最多5分钟，另有1分钟持久化收尾；较短运行配置优先。
-// 此处还独立约束不响应取消的规划调用，连续超时会触发任务故障保护。
-const plannerRoundTimeout = 6 * time.Minute
+// Default for callers without an agent configuration: twenty minutes plus
+// settlement. Production uses the planner's configured limit, including 0.
+const plannerRoundTimeout = 21 * time.Minute
 
 // plannerRoundTimeoutOverride 让测试能用秒级上限验证「规划轮卡住也不拖死
-// planner 循环」。生产路径不设置它（保持 plannerRoundTimeout）。
+// planner 循环」。生产路径不设置它（使用智能体运行配置）。
 var plannerRoundTimeoutOverride time.Duration
 
 // plannerRoundLimit 返回本轮规划生效的墙钟上限。
-func plannerRoundLimit() time.Duration {
-	if plannerRoundTimeoutOverride > 0 {
-		return plannerRoundTimeoutOverride
+func plannerRoundLimit(configured ...time.Duration) time.Duration {
+	limit := plannerRoundTimeout
+	if len(configured) > 0 {
+		limit = max(0, configured[0])
 	}
-	return plannerRoundTimeout
+	if plannerRoundTimeoutOverride > 0 && (limit == 0 || plannerRoundTimeoutOverride < limit) {
+		limit = plannerRoundTimeoutOverride
+	}
+	return limit
+}
+
+func plannerRoundContext(ctx context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
+	if limit <= 0 {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, limit)
 }
 
 // plannerRoundOutcome 是一轮规划的结果。
@@ -986,8 +1002,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
 				} else if won {
 					e.warnFindingsWithoutReport(t)
+					metadata, _ := json.Marshal(map[string]any{"task_completion": map[string]any{"reason": "frontier_drained", "coverage_exhausted": false}})
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-						Summary: "目标已全部达成，直投意图已执行完毕，任务结束"})
+						Summary: "当前目标队列与已派发意图已结束，任务收尾；不代表全部测试面已验证", Metadata: metadata})
 				}
 			}
 			return // goalless 分支永不进入 planner.Plan
@@ -1017,9 +1034,10 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 此后 6 小时零规划轮、零新意图——「运行中 Worker」恒为 0，任务看着还在
 		// running 却什么都不干。重启服务即恢复。
 		//
-		// 主探索5分钟及1分钟收尾构成硬上限；较短的配置继续夹逼。
-		roundLimit := min(plannerRoundLimit(), planner.RoundLimit())
-		roundCtx, roundCancel := context.WithTimeout(ectx, roundLimit)
+		// Keep the configured exploration budget and bounded settlement grace.
+		// The goroutine watchdog still abandons a stuck Plan at that deadline.
+		roundLimit := plannerRoundLimit(planner.RoundLimit())
+		roundCtx, roundCancel := plannerRoundContext(ectx, roundLimit)
 		defer roundCancel()
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
@@ -1049,7 +1067,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// goroutine leaks (Go cannot kill one), which is the lesser evil: one
 		// leaked goroutine per stuck round versus a permanently mute planner.
 		res := runPlannerRound(roundCtx, func(ctx context.Context) (bool, string, error) {
-			return planner.Plan(ctx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+			return planner.Plan(agent.WithProgressNotify(ctx, t.Notify), taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
 		})
 		e.EndLLMCall(t.ID)
 		code := plannerFailureCode(res.err, roundCtx.Err() != nil && ectx.Err() == nil)
@@ -1062,7 +1080,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			// 这一支必须能走到：超时时本轮作废，runRound 正常结束，
 			// planner 恢复响应——下次唤醒再规划一轮。**不能**让它走进下面的
 			// "规划出错"分支后被静默吞掉，否则会退回「永久哑火」的旧症状。
-			log.Printf("[planner] task %s 规划轮超时(%s)，本轮作废，等下次唤醒重试", t.ID, plannerRoundLimit())
+			log.Printf("[planner] task %s 规划轮超时(%s)，本轮作废，等下次唤醒重试", t.ID, roundLimit)
 		case res.err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, res.err)
 		case res.met:
@@ -1268,6 +1286,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
 	var err error
+	workCtx = agent.WithProgressNotify(workCtx, t.Notify)
 	if hasChatMessage {
 		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
 	} else {
@@ -1404,6 +1423,9 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	state := "done"
 	stopReason := ""
 	switch {
+	case reason == agent.WorkerReasonIdleStop || errors.Is(err, agent.AbortIdleStop):
+		state = "exhausted"
+		stopReason = "idle_stop"
 	case err != nil:
 		state = "blocked"
 		stopReason = db.IntentStopError
@@ -1419,6 +1441,12 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		state = "exhausted"
 		stopReason = db.IntentStopTimeout
 		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
+	case reason == harness.ReasonStopHookPrevented || reason == harness.ReasonHookStopped:
+		state = "blocked"
+		stopReason = "hook_prevented"
+	case reason != harness.ReasonCompleted:
+		state = "blocked"
+		stopReason = "incomplete: " + string(reason)
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)

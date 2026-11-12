@@ -240,7 +240,11 @@ func TestSideSummaryCancellationAndFailureDoNotAdvanceMemory(t *testing.T) {
 				replay.Save = func(context.Context, Memory) error { return errors.New("cleared") }
 			}
 			out, _, err := (SideQuestionService{p}).Respond(ctx, Snapshot{Request: fixture()}, "q", replay, ContextOptions{}, nil)
-			if err == nil || calls != 1 || memory.Through != 0 || out.Usage.InputTokens != 9 {
+			wantCalls := 1
+			if mode == "empty" || mode == "truncated" || mode == "too-large" {
+				wantCalls = 2 // one bounded recovery; neither failed attempt advances memory
+			}
+			if err == nil || calls != wantCalls || memory.Through != 0 || out.Usage.InputTokens != 9*wantCalls {
 				t.Fatalf("failed preparation: %+v %+v %v", memory, out, err)
 			}
 		})

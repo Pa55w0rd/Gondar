@@ -321,10 +321,10 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                         value={maxTurns} onChange={(e) => setMaxTurns(e.target.value)} />
                     </div>
                     <div className="grid gap-1.5">
-                      <Label htmlFor="run-seconds" className="text-xs">{agentKey === "planner" ? "主探索时长（秒，最多300）" : "运行时长（秒，0=不限）"}</Label>
+                      <Label htmlFor="run-seconds" className="text-xs">{agentKey === "planner" ? "主探索时长（秒，0=不限）" : "运行时长（秒，0=不限）"}</Label>
                       <Input id="run-seconds" type="number" min={0} className="h-8 w-32"
                         value={runSecs} onChange={(e) => setRunSecs(e.target.value)} />
-                      {agentKey === "planner" && <span className="max-w-xs text-muted-foreground text-xs">0 使用 300 秒；较短设置优先，另有最多 60 秒收尾。</span>}
+                      {agentKey === "planner" && <span className="max-w-xs text-muted-foreground text-xs">按配置执行，另有最多 60 秒收尾。0 不限制主探索总时长，但单次模型调用仍有 10 分钟保护。</span>}
                     </div>
                   </>
                 )}

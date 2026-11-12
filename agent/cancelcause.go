@@ -42,6 +42,8 @@ var (
 		"任务到达 timeout 后等待正在运行的 Worker 优雅收尾，但 90 秒 drain 宽限仍不足，因此执行硬取消；意图会标记为 exhausted，收尾阶段已经写入的事实和资产会保留")
 
 	// Per-work context.
+	AbortIdleStop = cause("idle_stop", "运行检查点保护已停止本轮",
+		"本意图近期没有新的成功回显，或已到保存检查点间隔；提醒保存后仍未产生实际新增，因此停止当前运行。已经保存的事实、资产、漏洞和证据保留；这不表示该方向已被证伪，未验证步骤仍可按实际前提继续")
 	AbortKilledByPlanner = cause("killed_by_planner", "规划者终止了这条意图",
 		"规划者调用 kill_work 主动终止了这条意图，通常表示方向跑偏或已无继续价值；意图会标记为 stopped，不会自动重新领取")
 	AbortWorkPausedByUser = cause("work_paused_by_user", "用户暂停了这条 Worker 意图",

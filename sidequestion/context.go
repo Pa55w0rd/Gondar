@@ -132,22 +132,39 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 		if EstimateInputTokens(req)+req.MaxTokens+512 > b.window {
 			return "", ErrContextBudget
 		}
-		b.calls++
-		msg, stop, usage, err := b.service.Provider.Complete(ctx, req)
-		b.usage.Add(usage)
-		b.progress(b.info.Phase)
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		var result string
+		for attempt := 0; attempt < 2; attempt++ {
+			if b.calls >= 12 {
+				return "", errors.New("旁路上下文整理已达到本次处理上限，请缩小问题范围后重试")
+			}
+			if attempt > 0 {
+				req.Messages[0] = llm.UserText(req.Messages[0].Text() + "\n[恢复要求]上一份摘要为空、截断或过长。请直接生成完整精简摘要，保留证据和未解决事项，不重复原文，不调用工具。")
+				req.MaxTokens = min(4096, b.window-EstimateInputTokens(req)-512)
+				if req.MaxTokens < 512 {
+					return "", ErrContextBudget
+				}
+			}
+			b.calls++
+			msg, stop, usage, err := b.service.Provider.Complete(ctx, req)
+			b.usage.Add(usage)
+			b.progress(b.info.Phase)
+			if ctx.Err() != nil {
+				return "", ctx.Err()
+			}
+			if err != nil {
+				return "", fmt.Errorf("旁路摘要失败：%w", err)
+			}
+			if len(msg.ToolUses()) != 0 {
+				return "", errors.New("旁路摘要返回了不允许的工具调用，已停止整理")
+			}
+			result = strings.TrimSpace(msg.Text())
+			if result != "" && stop != "max_tokens" && stop != "length" && EstimateInputTokens(llm.CompletionRequest{Messages: []llm.Message{llm.UserText(result)}}) <= 2200 {
+				break
+			}
+			result = ""
 		}
-		if err != nil {
-			return "", fmt.Errorf("旁路摘要失败：%w", err)
-		}
-		result := strings.TrimSpace(msg.Text())
-		if result == "" || stop == "max_tokens" || stop == "length" || len(msg.ToolUses()) > 0 {
-			return "", errors.New("旁路摘要未完整生成，请重试")
-		}
-		if EstimateInputTokens(llm.CompletionRequest{Messages: []llm.Message{llm.UserText(result)}}) > 2200 {
-			return "", errors.New("旁路摘要未缩减到预算内，请重试")
+		if result == "" {
+			return "", errors.New("旁路摘要在一次恢复后仍未完整缩减到预算内，请缩小问题范围后重试")
 		}
 		prior, text = result, text[n:]
 	}

@@ -301,6 +301,9 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	if c.Format == llm.FormatOpenAI {
+		client.Transport = openAIStreamTransport{base: client.Transport}
+	}
 	client.Transport, err = limitModelRequests(client.Transport, c)
 	if err != nil {
 		return nil, err

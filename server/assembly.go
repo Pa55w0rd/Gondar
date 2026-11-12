@@ -187,6 +187,29 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 			Unlock:      unlock,
 			UnlockSkill: unlockSkill,
 		}
+		if reg != nil {
+			var index strings.Builder
+			index.WriteString("\n\n**本角色当前可用技能速查**：按任务与真实证据选择相关项，再用Skill加载；目录仅作索引，不代表步骤已经执行。")
+			budget := 1600
+			namesOnly := false
+			for _, entry := range reg.List() {
+				desc := strings.Join(strings.Fields(entry.Description), " ")
+				runes := []rune(desc)
+				if len(runes) > 100 {
+					desc = string(runes[:100]) + "…"
+				}
+				line := "\n- " + entry.Name
+				if !namesOnly && len([]rune(line+"："+desc)) > budget {
+					namesOnly = true
+				}
+				if !namesOnly {
+					line += "：" + desc
+				}
+				index.WriteString(line)
+				budget -= len([]rune(line))
+			}
+			def.SkillGuidance = index.String()
+		}
 		return extra, def, cleanup
 	}
 }
@@ -256,6 +279,9 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 		if err := pg.SeedTool(s.Key, s.Desc, schema, agents); err != nil {
 			log.Printf("[tools] seed %s 失败: %v", s.Key, err)
 		}
+	}
+	if err := pg.UpgradeWorkerFactReader(); err != nil {
+		log.Printf("[tools] 事实读取工具默认绑定升级失败: %v", err)
 	}
 	// Seed the traffic host tools so they're bindable per-agent like built-ins.
 	// Default binding = worker (preserves prior behavior). Their runtime availability

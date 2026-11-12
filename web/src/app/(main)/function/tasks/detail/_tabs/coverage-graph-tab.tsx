@@ -350,7 +350,7 @@ function AssetSheet({
                   <DetailRow label="测试状态">
                     {node.in_scope ? (
                       node.tested ? (
-                        <span className="text-emerald-600 dark:text-emerald-400">已测试</span>
+                        <span className="text-emerald-600 dark:text-emerald-400">已关联事实</span>
                       ) : (
                         <span className="text-neutral-500">未测试</span>
                       )
@@ -653,7 +653,7 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
               {coverageEnabled && (
                 <>
                   {" "}
-                  · 已测{" "}
+                  · 已关联事实{" "}
                   <span className="font-semibold text-emerald-600 tabular-nums dark:text-emerald-400">{tested}</span>
                 </>
               )}
@@ -683,10 +683,10 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
           {coverageEnabled && (
             <>
               <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded-full bg-emerald-500" /> 已测（高亮）
+                <span className="size-3 rounded-full bg-emerald-500" /> 已关联事实（高亮）
               </span>
               <span className="inline-flex items-center gap-1.5">
-                <span className="size-3 rounded-full bg-neutral-400" /> 未测
+                <span className="size-3 rounded-full bg-neutral-400" /> 未关联事实
               </span>
             </>
           )}

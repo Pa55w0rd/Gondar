@@ -47,6 +47,7 @@ export default function SystemSettingsPage() {
   const [savingWorkers, setSavingWorkers] = React.useState(false);
   // 任务自动收尾（v0.5.0）。
   const [autoFinishEnabled, setAutoFinishEnabled] = React.useState(true);
+  const [reportRecoveryEnabled, setReportRecoveryEnabled] = React.useState(true);
   const [autoFinishIdle, setAutoFinishIdle] = React.useState("3");
   const [autoFinishMin, setAutoFinishMin] = React.useState("5");
   const [autoFinishCoverage, setAutoFinishCoverage] = React.useState("0");
@@ -93,6 +94,7 @@ export default function SystemSettingsPage() {
     setInjectWorker(s.constraints_inject_worker !== false);
     setNoaCompaction(!!s.noa_compaction);
     setAutoFinishEnabled(s.auto_finish_enabled !== false);
+    setReportRecoveryEnabled(s.report_recovery_enabled !== false);
     setAutoFinishIdle(String(s.auto_finish_idle_rounds ?? 3));
     setAutoFinishMin(String(s.auto_finish_min_rounds ?? 5));
     setAutoFinishCoverage(String(s.auto_finish_coverage_pct ?? 0));
@@ -143,6 +145,7 @@ export default function SystemSettingsPage() {
     api
       .setSettings({
         auto_finish_enabled: autoFinishEnabled,
+        report_recovery_enabled: reportRecoveryEnabled,
         auto_finish_idle_rounds: idle,
         auto_finish_min_rounds: min,
         auto_finish_coverage_pct: cov,
@@ -916,13 +919,20 @@ export default function SystemSettingsPage() {
             <div className="flex items-center justify-between gap-4 rounded-lg border px-3 py-2">
               <div className="flex flex-col">
                 <span className="text-sm font-medium">启用自动收尾</span>
-                <span className="text-muted-foreground text-xs">关闭后只能靠任务超时或目标闭环结束</span>
+                <span className="text-muted-foreground text-xs">预算、空转与故障保护独立生效</span>
               </div>
               <Switch
                 checked={autoFinishEnabled}
                 disabled={!loaded || savingAutoFinish}
                 onCheckedChange={setAutoFinishEnabled}
               />
+            </div>
+            <div className="flex items-center justify-between gap-4 rounded-lg border p-3">
+              <div className="flex flex-col gap-1">
+                <span className="font-medium text-sm">自动补齐缺失报告</span>
+                <span className="text-muted-foreground text-xs">仅用已有材料生成，最多尝试6次，失败后退避；跳过暂停任务，不访问目标或重启扫描。关闭后不再领取新报告，已开始的生成按原预算结束。</span>
+              </div>
+              <Switch checked={reportRecoveryEnabled} disabled={!loaded || savingAutoFinish} onCheckedChange={setReportRecoveryEnabled} />
             </div>
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm">
@@ -950,7 +960,7 @@ export default function SystemSettingsPage() {
                 />
               </label>
               <label className="flex flex-col gap-1 text-sm">
-                <span>覆盖率阈值 %（0 = 关闭）</span>
+                <span>资产关联率阈值 %（0 = 关闭）</span>
                 <Input
                   type="number"
                   min={0}

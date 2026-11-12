@@ -119,7 +119,7 @@ func (s *Server) continueTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"id": t.ID, "queued": queued, "status": map[bool]string{true: "queued", false: "running"}[queued]})
 }
 
-func (e *Engine) pauseContinuousRun(t *Task, reason, detail string) {
+func (e *Engine) pauseContinuousRun(t *Task, reason, detail string, failures ...string) {
 	n, err := strconv.ParseInt(t.ID, 10, 64)
 	if err != nil {
 		return
@@ -135,6 +135,6 @@ func (e *Engine) pauseContinuousRun(t *Task, reason, detail string) {
 	}
 	t.clearSettle()
 	e.Pause(t.ID, agent.AbortContinuousPause)
-	metadata, _ := json.Marshal(map[string]any{"continuous_pause": map[string]any{"reason": reason, "detail": detail, "resumable": true}})
+	metadata, _ := json.Marshal(map[string]any{"continuous_pause": map[string]any{"reason": reason, "detail": detail, "consecutive_reasons": failures, "resumable": true}})
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "持续挖掘触发保护，已暂停并保留成果", Detail: detail + "；暂停不代表授权范围已测完。检查阻塞后可人工继续。", Metadata: metadata})
 }

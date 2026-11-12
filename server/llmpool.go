@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"log"
 	"time"
 
@@ -23,20 +24,22 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 	if pg == nil {
 		return llmpool.NewRegistry(nil, nil)
 	}
+	writer := &healthWriter{store: func(ctx context.Context, id int64, h *db.LLMHealth) error {
+		if h == nil {
+			return pg.ClearLLMHealthContext(ctx, id)
+		}
+		return pg.SaveLLMHealthContext(ctx, *h)
+	}}
 	persist := func(id int64, st llmpool.State) {
 		h := db.LLMHealth{ProfileID: id, Fails: st.Fails, Trips: st.Trips, LastError: st.LastError}
 		if !st.OpenUntil.IsZero() {
 			t := st.OpenUntil
 			h.OpenUntil = &t
 		}
-		go func() {
-			if err := pg.SaveLLMHealth(h); err != nil {
-				log.Printf("[llmpool] 熔断状态落库失败: %v", err)
-			}
-		}()
+		writer.enqueue(id, &h)
 	}
 	forget := func(id int64) {
-		go func() { _ = pg.ClearLLMHealth(id) }()
+		writer.enqueue(id, nil)
 	}
 	reg := llmpool.NewRegistry(persist, forget)
 	// Restore only windows that haven't expired (LoadLLMHealth filters), so a

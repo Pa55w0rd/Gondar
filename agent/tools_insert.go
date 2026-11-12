@@ -672,9 +672,10 @@ func splitLines(s string) []string {
 // WorkerTools returns the tool set for a work agent.
 func (t *ToolSet) WorkerTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		// list_findings 保留：报漏洞前先查本任务已确认漏洞，避免重复上报同一漏洞。
-		t.listFindings(),
+		t.listFindings(), t.listFacts(),
 		t.addFinding(), t.recordFact(),
 		// asset management (handlers guard nil store internally)。
 		// add_company_scope 不给 worker：定义企业资产范围属规划/主控/Auto 的职责，worker 只执行探索。
@@ -715,6 +716,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 // MainAgentTools returns the human-interface tool set.
 func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		t.listArtifacts(), t.previewEvidence(), t.proposeLesson(), t.recallLessons(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),

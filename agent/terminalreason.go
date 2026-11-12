@@ -44,6 +44,13 @@ var reasonHint = map[harness.TerminalReason]string{
 	harness.ReasonAbortedTools:      "运行在工具执行阶段被取消",
 }
 
+func completedRunError(reason harness.TerminalReason, err error) error {
+	if err != nil || reason == harness.ReasonCompleted {
+		return err
+	}
+	return fmt.Errorf("会话本轮未完成（%s）；已执行工具与保存成果保留，请核对实际回执后继续", reason)
+}
+
 // terminalText renders a terminal event with no final text into a compact summary
 // and a Markdown detail block.
 func terminalText(ctx context.Context, term *harness.Terminal, tr *runTrace) (string, string) {

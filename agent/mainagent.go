@@ -135,7 +135,8 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	}
 	tsx.SetTaskID(taskID)
 	tsx.SetCoverageEnabled(as == nil || as.CoverageEnabled(taskID))
-	tsx.SetNotify(notify)             // 通用唤醒（无专用回调的写操作走它，debounced）
+	tsx.SetNotify(notify) // 通用唤醒（无专用回调的写操作走它，debounced）
+	tsx.SetNotifyProgress(notify)
 	tsx.SetResumeTask(resume)         // set_goals 新增目标 → 把已完成/暂停的任务拉回 running
 	tsx.SetNotifyGoal(notifyGoal)     // set_goals 新增目标 → 给 planner 记一条「人新增了目标：…」触发
 	tsx.SetNotifyHint(notifyHint)     // add_hint 新增提示 → 给 planner 记一条「人新增了 N 条战略提示：…」触发
@@ -213,11 +214,11 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// C2: this session is fresh each turn; re-unlock skill-gated MCPs from prior
 	// Skill() calls in the reloaded history so revealed tools stay callable.
 	seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
-	text, _, err := captureRunSession(ctx, s, message, func(r db.Activity) {
+	text, reason, err := captureRunSession(ctx, s, message, func(r db.Activity) {
 		if emit != nil {
 			r.Worker = "mainagent"
 			emit(r)
 		}
 	})
-	return text, err
+	return text, completedRunError(reason, err)
 }

@@ -1056,6 +1056,7 @@ export interface Settings {
   task_concurrency_limit?: number; // 开启后默认 5
   // 任务自动收尾（v0.5.0）：连续无新增 / 覆盖率达标 / 最大规划轮数。
   auto_finish_enabled?: boolean; // 默认 true
+  report_recovery_enabled?: boolean; // 默认 true，只补已有材料的空报告
   auto_finish_idle_rounds?: number; // 默认 3，范围 2–20
   auto_finish_min_rounds?: number; // 默认 5，范围 1–50
   auto_finish_coverage_pct?: number; // 默认 0=关闭，1–100

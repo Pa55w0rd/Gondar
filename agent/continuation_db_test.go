@@ -2,6 +2,7 @@ package agent
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -9,12 +10,8 @@ import (
 	"gondar/db"
 )
 
-// 接续代数上限必须真的在**写入路径**上生效——单测覆盖代数计算还不够，
-// 必须验证 addOneIntent 会拒绝超代的接续。
-//
-// 回归背景：接续链此前没有闸，线上出现过三代接续（#635 → #578 → #660），
-// 每一代都从零重建上下文、重复读同一批文件、重复扫同一批资产。
-func TestAddIntentRejectsContinuationBeyondDepth(t *testing.T) {
+// 有新的真实证据时，链深不再是拒绝继续验证的理由。
+func TestAddIntentContinuesDeepWithNewEvidence(t *testing.T) {
 	d := testDB(t)
 	task, err := d.CreateTask("续代数测试", "goal", nil, 0, 0)
 	if err != nil {
@@ -25,7 +22,7 @@ func TestAddIntentRejectsContinuationBeyondDepth(t *testing.T) {
 	tools := NewToolSet(store, "planner")
 	tools.SetTaskID(task.ID)
 
-	// 建一条链：intent1 → intent2 → intent3，每一条接续前一条。
+	// 通过真实工具写入路径保存检查点，验证超过旧三代限制仍能继续。
 	prevID, err := tools.addOneIntent(intentItem{Summary: "第一代：探某个方向"})
 	if err != nil {
 		t.Fatalf("第一代: %v", err)
@@ -34,30 +31,25 @@ func TestAddIntentRejectsContinuationBeyondDepth(t *testing.T) {
 		b, _ := json.Marshal(id)
 		return b
 	}
-	for gen := 2; gen <= maxContinuationDepth; gen++ {
+	for gen := 2; gen <= 8; gen++ {
+		if _, err := tools.recordOneFact(factItem{Summary: fmt.Sprintf("已实际核对的合成步骤%d", gen), Evidence: fmt.Sprintf("local fixture output %d", gen)}, prevID); err != nil {
+			t.Fatal(err)
+		}
 		if err := store.SetIntentState(prevID, "exhausted"); err != nil {
 			t.Fatal(err)
 		}
 		next, err := tools.addOneIntent(intentItem{
-			Summary:   "接续第 " + string(rune('0'+gen)) + " 代",
+			Summary:   fmt.Sprintf("接续第%d代，验证下一合成步骤", gen),
 			Continues: []json.RawMessage{mkID(prevID)},
 		})
 		if err != nil {
-			t.Fatalf("第 %d 代接续应被允许（上限 %d）: %v", gen, maxContinuationDepth, err)
+			t.Fatalf("第%d代有新证据的接续应被允许: %v", gen, err)
 		}
 		prevID = next
 	}
-	// 再接一代就超了。
-	if err := store.SetIntentState(prevID, "exhausted"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := tools.addOneIntent(intentItem{
-		Summary:   "接续第 " + string(rune('0'+maxContinuationDepth+1)) + " 代",
-		Continues: []json.RawMessage{mkID(prevID)},
-	}); err == nil {
-		t.Fatalf("接续代数超过 %d 应被拒绝", maxContinuationDepth)
-	} else if !strings.Contains(err.Error(), "接续代数") {
-		t.Fatalf("拒绝原因应说明是接续代数超限: %v", err)
+	last, err := store.GetNode(prevID)
+	if err != nil || continuationDepthOf(last) != 8 {
+		t.Fatalf("深链追踪丢失：node=%+v err=%v", last, err)
 	}
 }
 

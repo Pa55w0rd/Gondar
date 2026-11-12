@@ -268,14 +268,17 @@ type DeleteTaskResult struct {
 // Manager owns the PostgreSQL data source (asset graph + every task's exploration
 // graph + config) and the in-memory set of task handles.
 type Manager struct {
-	dir         string
-	pg          *pgdb.DB
-	assets      *pgdb.AssetStore
-	traffic     *traffic.Traffic       // process-wide recording proxy (may be nil)
-	enrich      *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
-	interceptor *intercept.Interceptor // user-configured tool-call interception rules
-	vulnintel   *vulnintel.Store       // public CVE/KEV intel store (agent search_vulns reads it)
-	nucleiDir   string                 // local nuclei-templates checkout (synced by vulnintel goroutine)
+	backgroundCtx    context.Context
+	backgroundCancel context.CancelFunc
+	backgroundWG     sync.WaitGroup
+	dir              string
+	pg               *pgdb.DB
+	assets           *pgdb.AssetStore
+	traffic          *traffic.Traffic       // process-wide recording proxy (may be nil)
+	enrich           *enrich.Engine         // engine-side asset auto-completion (DNS/HTTP)
+	interceptor      *intercept.Interceptor // user-configured tool-call interception rules
+	vulnintel        *vulnintel.Store       // public CVE/KEV intel store (agent search_vulns reads it)
+	nucleiDir        string                 // local nuclei-templates checkout (synced by vulnintel goroutine)
 	// 漏洞情报同步的互斥与状态：定时循环与页面「立即同步」共用一把锁，保证同一时刻
 	// 只有一轮，避免并发写 vuln_sync_state、抢 NVD 限速。
 	vulnSyncMu        sync.Mutex
@@ -588,6 +591,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m.backgroundCtx, m.backgroundCancel = context.WithCancel(context.Background())
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -674,9 +678,16 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	agent.SetVulnIntelStore(m.vulnintel)
 	agent.SetNucleiTemplatesDir(m.nucleiDir)
 	if pg.GetBool(settingVulnIntelOn, true) {
-		go m.runVulnIntelSync()
+		m.backgroundWG.Add(2)
+		go func() {
+			defer m.backgroundWG.Done()
+			m.runVulnIntelSync(m.backgroundCtx)
+		}()
 		// 近期高危快通道：独立 goroutine + 独立锁，不被主同步的 30 分钟一轮拖住。
-		go m.runVulnIntelFastLane()
+		go func() {
+			defer m.backgroundWG.Done()
+			m.runVulnIntelFastLane(m.backgroundCtx)
+		}()
 	} else {
 		log.Printf("[vulnintel] 同步已关闭（settings.%s=false），agent 工具将返回未启用", settingVulnIntelOn)
 	}
@@ -1039,28 +1050,35 @@ func (m *Manager) ProxyCACert() string {
 // per-run ceiling (vulnintel.Config.MaxRuntime) bounds each pass, the cursor
 // resumes where the previous one stopped, so a slow first backfill simply
 // finishes over several cycles. The toggle is re-read each cycle so turning it
-// off in the UI takes effect without a restart. No shutdown channel: the
-// process exit reaps it, same as the traffic proxy goroutine.
-func (m *Manager) runVulnIntelSync() {
-	time.Sleep(90 * time.Second) // 避开启动风暴（LLM 链接、traffic proxy 起动期）
+// off in the UI takes effect without a restart. Manager.Close cancels both the
+// delay and active work before the database can be closed.
+func (m *Manager) runVulnIntelSync(ctx context.Context) {
+	if !waitManagerBackground(ctx, 90*time.Second) {
+		return
+	}
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if !m.pg.GetBool(settingVulnIntelOn, true) {
 			log.Printf("[vulnintel] 同步已关闭，进入待机（仍刷新 nuclei 模板树）")
 			// 模板树与情报同步解耦：scan_with_nuclei 是独立功能，开关关掉也不该让它烂在原地。
 			// 仍拿同一把锁，避免与页面「立即同步」并发跑 git。
 			if m.vulnSyncMu.TryLock() {
-				m.refreshNucleiTemplates(m.vulnIntelProxy())
+				m.refreshNucleiTemplates(ctx, m.vulnIntelProxy())
 				m.vulnSyncMu.Unlock()
 			}
 		} else {
-			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+			runCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 			// TryLock 保证与页面「立即同步」不并发：同一时刻只允许一轮。
-			if err := m.runVulnIntelPass(ctx); err != nil {
+			if err := m.runVulnIntelPass(runCtx); err != nil && ctx.Err() == nil {
 				log.Printf("[vulnintel] 本轮跳过: %v", err)
 			}
 			cancel()
 		}
-		time.Sleep(defaultVulnIntelInterval)
+		if !waitManagerBackground(ctx, defaultVulnIntelInterval) {
+			return
+		}
 	}
 }
 
@@ -1125,6 +1143,17 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 }
 
 func (m *Manager) Close() error {
+	if m.backgroundCancel != nil {
+		m.backgroundCancel()
+	}
+	m.CancelVulnIntelSync()
+	m.backgroundWG.Wait()
+	// A manual sync can outlive the scheduler. It shares the lifetime context;
+	// wait for cancellation to release its lock before closing its store.
+	m.vulnSyncMu.Lock()
+	m.vulnSyncMu.Unlock()
+	m.vulnFastLaneMu.Lock()
+	m.vulnFastLaneMu.Unlock()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.traffic != nil {

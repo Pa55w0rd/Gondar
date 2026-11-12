@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -101,9 +102,10 @@ func TestPlannerFailedDraftPreservesPreviousHandoff(t *testing.T) {
 		t.Fatalf("save: %v %v", ok, err)
 	}
 	calls := 0
+	reply := "No answer requested."
 	provider := plannerStateProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
-		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("No answer requested.")}}, "end_turn", llm.Usage{}, nil
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock(reply)}}, "end_turn", llm.Usage{}, nil
 	}}
 	p := NewPlanner(provider, "fixture", t.TempDir(), nil, 10000, 0)
 	p.SetNonStreaming(func() bool { return true })
@@ -113,6 +115,14 @@ func TestPlannerFailedDraftPreservesPreviousHandoff(t *testing.T) {
 	got, err := s.BeginPlannerRound()
 	if err != nil || got.Summary != state.Summary || got.Outcome != "error" || calls != 2 {
 		t.Fatalf("valid handoff lost: %+v calls=%d err=%v", got, calls, err)
+	}
+	reply = "缺少受控会话，身份验证尚未完成，需要补充前置条件。"
+	if _, _, err := p.Plan(t.Context(), task.ID, nil, s, task.Goal, nil, nil); !errors.Is(err, ErrPlannerNoProgress) {
+		t.Fatalf("blocker prose incorrectly counted as execution: %v", err)
+	}
+	got, err = s.BeginPlannerRound()
+	if err != nil || !strings.Contains(got.Summary, state.Summary) || !strings.Contains(got.Summary, reply) || !strings.Contains(got.Summary, "本轮未完成") || len([]rune(got.Summary)) > 2000 {
+		t.Fatalf("old context or new blocker lost: %+v %v", got, err)
 	}
 }
 

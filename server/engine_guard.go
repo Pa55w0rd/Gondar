@@ -76,6 +76,7 @@ type repeatState struct {
 	hash    string
 	streak  int
 	blocked int
+	output  string
 }
 
 func newRepeatTracker() *repeatTracker {
@@ -120,9 +121,34 @@ func (rt *repeatTracker) observe(name string, input []byte) (int, bool) {
 		}
 		// Published states are immutable: changing next after a successful CAS
 		// races another tool call already reading it.
-		next := &repeatState{name: cur.name, hash: cur.hash, streak: cur.streak + 1, blocked: blocked}
+		next := &repeatState{name: cur.name, hash: cur.hash, streak: cur.streak + 1, blocked: blocked, output: cur.output}
 		if rt.mu.CompareAndSwap(cur, next) {
 			return cur.streak + 1, shouldBlock
+		}
+	}
+}
+
+func (rt *repeatTracker) observeResult(name string, input, result []byte, failed bool) {
+	h := canonicalToolInput(name, input)
+	flag := byte(0)
+	if failed {
+		flag = 1
+	}
+	sum := sha256.Sum256(append([]byte{flag}, result...))
+	output := hex.EncodeToString(sum[:])
+	for {
+		cur := rt.mu.Load()
+		if cur == nil || cur.name != name || cur.hash != h {
+			return
+		}
+		next := *cur
+		if cur.output != "" && cur.output != output {
+			next.streak = 1
+			next.blocked = 0
+		}
+		next.output = output
+		if rt.mu.CompareAndSwap(cur, &next) {
+			return
 		}
 	}
 }
@@ -130,7 +156,7 @@ func (rt *repeatTracker) observe(name string, input []byte) (int, bool) {
 func repeatBlockText(streak int) string {
 	return fmt.Sprintf(
 		"【重复调用提醒】这个工具调用与你最近的调用完全相同（连续第 %d 次），本次未执行。"+
-			"同样的输入只会得到同样的输出——请改变其中一项：换目标/换参数/换方法；"+
+			"最近的同输入回执没有实质变化，请核对是否仍有合法等待中的作业，再决定换目标/参数/方法；"+
 			"或者承认当前手段已到头，把结论用 record_fact 写回（否定结论也有效）。",
 		streak)
 }

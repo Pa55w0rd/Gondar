@@ -1,6 +1,9 @@
 package db
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // LLM failover health: one row per profile tracking its circuit-breaker state.
 // The authoritative copy lives in memory (llmpool.Registry); this table only
@@ -40,7 +43,11 @@ FROM llm_profile_health WHERE open_until IS NOT NULL AND open_until > now()`)
 
 // SaveLLMHealth upserts one profile's circuit-breaker state.
 func (d *DB) SaveLLMHealth(h LLMHealth) error {
-	_, err := d.Exec(`
+	return d.SaveLLMHealthContext(context.Background(), h)
+}
+
+func (d *DB) SaveLLMHealthContext(ctx context.Context, h LLMHealth) error {
+	_, err := d.ExecContext(ctx, `
 INSERT INTO llm_profile_health(profile_id,fails,trips,open_until,last_error,last_at)
 VALUES ($1,$2,$3,$4,$5,now())
 ON CONFLICT (profile_id) DO UPDATE SET
@@ -52,6 +59,10 @@ ON CONFLICT (profile_id) DO UPDATE SET
 
 // ClearLLMHealth drops one profile's state (manual "recover now" from the UI).
 func (d *DB) ClearLLMHealth(profileID int64) error {
-	_, err := d.Exec(`DELETE FROM llm_profile_health WHERE profile_id=$1`, profileID)
+	return d.ClearLLMHealthContext(context.Background(), profileID)
+}
+
+func (d *DB) ClearLLMHealthContext(ctx context.Context, profileID int64) error {
+	_, err := d.ExecContext(ctx, `DELETE FROM llm_profile_health WHERE profile_id=$1`, profileID)
 	return err
 }

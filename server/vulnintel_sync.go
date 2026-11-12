@@ -78,11 +78,16 @@ func (m *Manager) SyncVulnIntelNow() bool {
 	if !m.vulnSyncMu.TryLock() {
 		return false
 	}
+	if m.managerBackgroundContext().Err() != nil {
+		m.vulnSyncMu.Unlock()
+		return false
+	}
 	m.vulnSyncRunning.Store(true)
 	m.vulnSyncStartedAt.Store(time.Now().Unix())
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+	ctx, cancel := context.WithTimeout(m.managerBackgroundContext(), 45*time.Minute)
 	m.storeSyncCancel(cancel)
 	go func() {
+		defer cancel()
 		defer m.vulnSyncMu.Unlock()
 		defer m.vulnSyncRunning.Store(false)
 		defer m.clearSyncCancel()
@@ -261,7 +266,7 @@ func (m *Manager) fastLaneConfig() vulnintel.FastLaneConfig {
 // 独立 goroutine、独立锁：主同步一轮最长 30 分钟，快通道必须能在那期间照常
 // 把新披露的高危送进库。两者共用 vuln_cves 表，upsert 是幂等的，重叠拉到
 // 同一条记录不会出问题。
-func (m *Manager) runVulnIntelFastLane() {
+func (m *Manager) runVulnIntelFastLane(ctx context.Context) {
 	// 起跑延迟要**大幅错开**主同步的 90s。
 	//
 	// 原来只错开 30 秒 —— 主同步 90s 起跑、快通道 120s 起跑，两者都要打
@@ -270,8 +275,13 @@ func (m *Manager) runVulnIntelFastLane() {
 	//
 	// 错开到 7 分钟：主同步那一轮（最长 30 分钟）基本跑完或接近跑完时，
 	// 快通道才开始，两边不抢额度。
-	time.Sleep(7 * time.Minute)
+	if !waitManagerBackground(ctx, 7*time.Minute) {
+		return
+	}
 	for {
+		if ctx.Err() != nil {
+			return
+		}
 		if m.fastLaneEnabled() {
 			m.fastLaneOnce()
 		}
@@ -281,7 +291,9 @@ func (m *Manager) runVulnIntelFastLane() {
 				interval = time.Duration(mins) * time.Minute
 			}
 		}
-		time.Sleep(interval)
+		if !waitManagerBackground(ctx, interval) {
+			return
+		}
 	}
 }
 
@@ -299,7 +311,7 @@ func (m *Manager) fastLaneOnce() {
 	}
 	defer m.vulnFastLaneMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultVulnIntelFastLaneMaxRuntime+time.Minute)
+	ctx, cancel := context.WithTimeout(m.managerBackgroundContext(), defaultVulnIntelFastLaneMaxRuntime+time.Minute)
 	defer cancel()
 
 	res, err := vulnintel.RunFastLane(ctx, m.vulnintel, m.fastLaneConfig())
@@ -436,7 +448,7 @@ func (m *Manager) vulnIntelPassLocked(ctx context.Context) error {
 	m.SetVulnSyncPhase("资产指纹联动")
 	m.linkVulnIntelAssets()
 	m.SetVulnSyncPhase("nuclei 模板树更新")
-	m.refreshNucleiTemplates(cfg.ProxyURL)
+	m.refreshNucleiTemplates(ctx, cfg.ProxyURL)
 	m.SetVulnSyncPhase("")
 	return nil
 }
@@ -445,13 +457,31 @@ func (m *Manager) vulnIntelPassLocked(ctx context.Context) error {
 // called outside the "enabled" gate: scan_with_nuclei is an independent feature
 // and the tree must not rot when intel sync is switched off. Caller owns
 // vulnSyncMu.
-func (m *Manager) refreshNucleiTemplates(proxyURL string) {
+func (m *Manager) refreshNucleiTemplates(ctx context.Context, proxyURL string) {
 	// 15 分钟：nuclei-templates depth-1 约 100-200MB，经慢代理 5 分钟必然超时——
 	// 超时杀掉的 clone 留下半成品目录，正是 Kali「0 个模板」事故的根因（v0.3.96）。
-	tplCtx, tplCancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	tplCtx, tplCancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer tplCancel()
 	if err := vulnintel.EnsureTemplates(tplCtx, m.nucleiDir, proxyURL); err != nil {
 		log.Printf("[vulnintel] nuclei 模板树更新失败: %v", err)
+	}
+}
+
+func (m *Manager) managerBackgroundContext() context.Context {
+	if m.backgroundCtx != nil {
+		return m.backgroundCtx
+	}
+	return context.Background() // isolated callers without a running manager
+}
+
+func waitManagerBackground(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return ctx.Err() == nil
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"gondar/agent"
@@ -22,6 +23,8 @@ func plannerFailureCode(err error, roundTimedOut bool) string {
 		return "task_deadline"
 	case roundTimedOut:
 		return "planner_round_timeout"
+	case errors.Is(err, agent.ErrModelCallTimeout):
+		return "planner_model_timeout"
 	case errors.Is(err, agent.ErrPlannerModelError) && (errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF)):
 		return "planner_response_interrupted"
 	case errors.Is(err, agent.ErrPlannerModelError):
@@ -52,6 +55,9 @@ func (e *Engine) recordPlannerOutcome(ctx context.Context, t *Task, round int64,
 	if code == "planner_response_interrupted" {
 		summary = "模型响应提前中断，本轮规划未完成：" + code
 	}
+	if code == "planner_model_timeout" {
+		summary = "模型调用达到配置时限，本轮规划未完成：" + code
+	}
 	e.emitActivity(t, db.Activity{Worker: "planner", Kind: "text", Summary: summary, IsError: code != "" && code != "task_deadline", Metadata: metadata})
 	if code == "task_deadline" {
 		return
@@ -64,15 +70,17 @@ func (e *Engine) recordPlannerOutcome(ctx context.Context, t *Task, round int64,
 	if streak < 3 || ctx.Err() != nil || e.IsPaused(t.ID) || e.IsDeleting(t.ID) {
 		return
 	}
-	if t.lifecycleSnapshot().CompletionMode == db.CompletionContinuous && streakCode == "planner_no_progress" {
-		e.pauseContinuousRun(t, "planner_no_progress", "连续三轮没有提交真实的新方向，已保留成果，等待补充前置条件或人工继续")
+	codes, _ := t.Store.PlannerFailureSequence(ctx)
+	if t.lifecycleSnapshot().CompletionMode == db.CompletionContinuous {
+		detail := fmt.Sprintf("连续%d轮规划未能推进（%s），已暂停并保留成果。请核对缺失的前置条件、实质证据和实际工具回执后继续", streak, strings.Join(codes, " → "))
+		e.pauseContinuousRun(t, streakCode, detail, codes...)
 		return
 	}
 	won, err := e.m.failPlannerTask(t)
 	if err != nil || !won {
 		return
 	}
-	metadata, _ = json.Marshal(map[string]any{"runtime_failure": map[string]any{"code": streakCode, "consecutive_runs": streak, "resumable": true}})
+	metadata, _ = json.Marshal(map[string]any{"runtime_failure": map[string]any{"code": streakCode, "consecutive_runs": streak, "consecutive_reasons": codes, "resumable": true}})
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
 		Summary: "连续3轮规划故障，已停止任务并保留进度",
 		Detail:  fmt.Sprintf("宿主连续记录到%d轮规划故障：%s。每轮已受预算及调用层重试约束，任务不会被标记为完成。目标、意图、事实、漏洞、证据和规划交接均保留；修复模型服务或具体阻塞后可人工恢复。", streak, streakCode), Metadata: metadata})
@@ -90,7 +98,7 @@ func (e *Engine) plannerRetryLimit() time.Duration {
 
 func (e *Engine) shouldRetryIdlePlanner(ctx context.Context, t *Task, code string) bool {
 	switch code {
-	case "planner_no_progress", "planner_read_loop", "planner_tool_failure_loop", "planner_model_unavailable", "planner_round_timeout", "planner_response_interrupted":
+	case "planner_no_progress", "planner_read_loop", "planner_tool_failure_loop", "planner_model_unavailable", "planner_model_timeout", "planner_round_timeout", "planner_response_interrupted":
 	default:
 		return false
 	}

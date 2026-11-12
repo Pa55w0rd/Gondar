@@ -28,7 +28,7 @@ func (e *ModelCallTimeoutError) Unwrap() error { return ErrModelCallTimeout }
 
 type modelCallLimitKey struct{}
 
-// A run's configured budget caps a single model call as well. This is not a
+// A run's configured budget supplies the single model call limit as well. This is not a
 // second absolute run timer: the SDK still owns its run clock and settlement.
 func withModelCallLimit(ctx context.Context, limit time.Duration) context.Context {
 	if limit <= 0 {
@@ -49,7 +49,9 @@ func modelCallContext(parent context.Context, limit time.Duration) (context.Cont
 	if limit <= 0 {
 		limit = defaultModelCallTimeout
 	}
-	if run, ok := parent.Value(modelCallLimitKey{}).(time.Duration); ok && run > 0 && run < limit {
+	// Explicit agent configuration replaces the fallback, including values above
+	// ten minutes. The live parent/task deadline still bounds the whole run.
+	if run, ok := parent.Value(modelCallLimitKey{}).(time.Duration); ok && run > 0 {
 		limit = run
 	}
 	deadline := time.Now().Add(limit)

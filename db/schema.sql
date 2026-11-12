@@ -1173,6 +1173,16 @@ ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL D
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS artifact_evidence_version BIGINT NOT NULL DEFAULT 0;
 
+-- Report delivery retries belong to the finding, so archive SELECT * retains
+-- the attempt budget. Leases are fenced on restore and never restart scanning.
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_recovery_attempts INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_recovery_next_at TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_recovery_token TEXT NOT NULL DEFAULT '';
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_recovery_lease_until TIMESTAMPTZ;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_recovery_error TEXT NOT NULL DEFAULT '';
+CREATE INDEX IF NOT EXISTS idx_findings_report_recovery ON findings(report_recovery_next_at,created_at,id)
+    WHERE btrim(report, E' \t\n\r')='' AND report_recovery_attempts<6;
+
 CREATE TABLE IF NOT EXISTS traffic_evidence_snapshots (
     id TEXT PRIMARY KEY,
     source_traffic_id TEXT NOT NULL,

@@ -730,7 +730,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base">
-              <TargetIcon className="size-4 text-emerald-500" /> 资产测试覆盖度
+              <TargetIcon className="size-4 text-emerald-500" /> 资产线索关联率
               <span className="font-normal text-muted-foreground text-xs">（粗估，仅供参考）</span>
             </CardTitle>
           </CardHeader>
@@ -740,10 +740,11 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                 {coverage.pct != null ? `${Math.round(coverage.pct * 100)}%` : "—"}
               </span>
               <span className="text-muted-foreground text-sm">
-                已测 {coverage.tested} / 范围内 {coverage.denominator}
+                已关联事实 {coverage.tested} / 范围内 {coverage.denominator}
               </span>
             </div>
             {coverage.pct != null && <Progress value={Math.round(coverage.pct * 100)} />}
+            <p className="text-muted-foreground text-xs">仅表示资产已关联事实，不代表接口、输入、身份与对照验证全部完成。</p>
             {coverage.by_type.length > 0 && (
               <div className="flex flex-wrap gap-1.5 text-xs">
                 {coverage.by_type.map((b) => (

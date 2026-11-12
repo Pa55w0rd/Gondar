@@ -51,23 +51,65 @@ func lockArtifactOwner(tx *sql.Tx, a *TaskArtifact) error {
 }
 
 func (d *DB) insertTaskArtifact(ctx context.Context, a *TaskArtifact) error {
+	_, err := d.InsertTaskArtifactWithProgress(ctx, a)
+	return err
+}
+
+// InsertTaskArtifactWithProgress serializes content deduplication with task
+// ownership checks. The receipt reports a committed new file, never a retry or
+// a change to the finding association.
+func (d *DB) InsertTaskArtifactWithProgress(ctx context.Context, a *TaskArtifact) (bool, error) {
 	if a == nil {
-		return errors.New("附件不能为空")
+		return false, errors.New("附件不能为空")
 	}
+	a.NewContent = false
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer tx.Rollback()
 	if err := lockArtifactOwner(tx, a); err != nil {
-		return err
+		return false, err
+	}
+	if a.SHA256 != "" {
+		var id, findingID int64
+		err := tx.QueryRowContext(ctx, `SELECT id,COALESCE(finding_id,0) FROM task_artifacts WHERE task_id=$1 AND sha256=$2 AND size_bytes=$3 ORDER BY id LIMIT 1 FOR UPDATE`, a.TaskID, a.SHA256, a.SizeBytes).Scan(&id, &findingID)
+		if err == nil {
+			if a.FindingID > 0 && findingID > 0 && a.FindingID != findingID {
+				return false, ErrArtifactAlreadyBound
+			}
+			if a.FindingID > 0 && findingID == 0 {
+				if _, err := tx.ExecContext(ctx, `UPDATE task_artifacts SET finding_id=$2,note=COALESCE(NULLIF(note,''),NULLIF($3,'')),source_url=COALESCE(NULLIF(source_url,''),NULLIF($4,'')) WHERE id=$1`, id, a.FindingID, a.Note, a.SourceURL); err != nil {
+					return false, err
+				}
+			}
+			if err := tx.Commit(); err != nil {
+				return false, err
+			}
+			existing, err := d.GetTaskArtifact(id)
+			if err != nil {
+				return false, err
+			}
+			if existing == nil {
+				return false, sql.ErrNoRows
+			}
+			*a = *existing
+			return false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
 	}
 	if err := tx.QueryRowContext(ctx, `INSERT INTO task_artifacts(task_id,finding_id,intent_id,name,kind,mime,size_bytes,sha256,source_url,note,storage_path,preview_state)
 VALUES ($1,NULLIF($2,0),NULLIF($3,0),$4,$5,NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),NULLIF($10,''),$11,NULLIF($12,'')) RETURNING id,created_at`,
 		a.TaskID, a.FindingID, a.IntentID, a.Name, a.Kind, a.Mime, a.SizeBytes, a.SHA256, a.SourceURL, a.Note, a.Storage, a.PreviewState).Scan(&a.ID, &a.CreatedAt); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	a.NewContent = true
+	return true, nil
 }
 
 func (d *DB) updateArtifactAssociation(id, findingID int64, note, sourceURL string, manual bool) (*TaskArtifact, error) {

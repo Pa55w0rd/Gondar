@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -275,9 +276,10 @@ func (e *Engine) settleTaskWithReason(ctx context.Context, t *Task, reason, deta
 	}
 	defer e.decInflight(t.ID)
 
-	// ⑥ 定终态(带守卫)：timeout 保持 met?done:timeout；自动收尾统一 done。
+	// Budget exhaustion remains a timeout even when the final checkpoint proves
+	// an individual goal. Preserve that proof separately from the stop reason.
 	status := "done"
-	if reason == "timeout" && !met {
+	if reason == "timeout" {
 		status = "timeout"
 	}
 	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
@@ -287,8 +289,9 @@ func (e *Engine) settleTaskWithReason(ctx context.Context, t *Task, reason, deta
 	case won:
 		e.warnFindingsWithoutReport(t)
 		log.Printf("[settle] task %s 收尾完成,终态=%s（%s）", t.ID, status, label)
+		metadata, _ := json.Marshal(map[string]any{"task_completion": map[string]any{"reason": reason, "goal_met": met, "coverage_exhausted": false}})
 		e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
-			Summary: fmt.Sprintf("任务收尾完成：%s；终态 %s", label, status)})
+			Summary: fmt.Sprintf("任务收尾完成：%s；终态 %s（不代表全面验证完成）", label, status), Metadata: metadata})
 	default:
 		log.Printf("[settle] task %s 收尾时已是终态,保留原状态", t.ID)
 	}
@@ -333,15 +336,15 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task, reason strin
 	// settleTask 在等这一步落终态——Plan 若卡死（上游半开连接/compactor 自死锁，
 	// 两类都是线上发生过的事故），任务会永远停在 settling。超时=按「未达成」
 	// 返回，走正常的超时收尾流程；卡死的 goroutine 泄漏是两害取其轻。
-	roundLimit := min(plannerRoundLimit(), planner.FinalRoundLimit())
-	roundCtx, roundCancel := context.WithTimeout(fctx, roundLimit)
+	roundLimit := plannerRoundLimit(planner.FinalRoundLimit())
+	roundCtx, roundCancel := plannerRoundContext(fctx, roundLimit)
 	defer roundCancel()
 	res := runPlannerRound(roundCtx, func(pctx context.Context) (bool, string, error) {
 		return planner.Plan(pctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
 	})
 	e.EndLLMCall(t.ID)
 	if res.err != nil && roundCtx.Err() != nil {
-		log.Printf("[deadline] task %s 终局规划超时(%s)，按未达成继续收尾", t.ID, plannerRoundLimit())
+		log.Printf("[deadline] task %s 终局规划超时(%s)，按未达成继续收尾", t.ID, roundLimit)
 		return false
 	}
 	if res.err != nil {

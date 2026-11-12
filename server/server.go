@@ -42,9 +42,10 @@ var BuildVersion = "dev"
 // Server exposes the Gondar backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	m      *Manager
-	engine *Engine
-	ctx    context.Context
+	m                    *Manager
+	engine               *Engine
+	ctx                  context.Context
+	reportRecoveryCancel context.CancelFunc
 
 	skillDir string       // root directory for skill subdirectories
 	keyDir   string       // directory holding jwt.key (next to the executable)
@@ -287,6 +288,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	// 主服务写不进去，只能由它自己换装——这里只负责发现版本不一致并通知。
 	s.StartHostdReconcile()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
+	reportCtx, reportCancel := context.WithCancel(s.ctx)
+	s.reportRecoveryCancel = reportCancel
+	go s.recoverFindingReports(reportCtx)
 	return s
 }
 
@@ -295,6 +299,9 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 func (s *Server) Close() {
 	if s == nil {
 		return
+	}
+	if s.reportRecoveryCancel != nil {
+		s.reportRecoveryCancel()
 	}
 }
 
@@ -3498,6 +3505,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"task_concurrency_limit":   concLimit, // 同时运行任务上限(开启后默认5)
 		// 任务自动收尾（v0.5.0）：连续无新增 / 覆盖率达标 / 最大规划轮数。
 		"auto_finish_enabled":      af.Enabled,
+		"report_recovery_enabled":  s.m.pg.GetBool("report_recovery_enabled", true),
 		"auto_finish_idle_rounds":  af.IdleRounds,
 		"auto_finish_min_rounds":   af.MinRounds,
 		"auto_finish_coverage_pct": af.CoveragePct,
@@ -3596,11 +3604,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		ConcurrencyEnabled *bool `json:"task_concurrency_enabled"`
 		ConcurrencyLimit   *int  `json:"task_concurrency_limit"`
 		// 任务自动收尾（v0.5.0）：连续 N 轮零新增 / 覆盖率阈值 / 最大规划轮数。
-		AutoFinishEnabled    *bool `json:"auto_finish_enabled"`
-		AutoFinishIdleRounds *int  `json:"auto_finish_idle_rounds"`
-		AutoFinishMinRounds  *int  `json:"auto_finish_min_rounds"`
-		AutoFinishCoverage   *int  `json:"auto_finish_coverage_pct"`
-		AutoFinishMaxRounds  *int  `json:"auto_finish_max_rounds"`
+		AutoFinishEnabled     *bool `json:"auto_finish_enabled"`
+		ReportRecoveryEnabled *bool `json:"report_recovery_enabled"`
+		AutoFinishIdleRounds  *int  `json:"auto_finish_idle_rounds"`
+		AutoFinishMinRounds   *int  `json:"auto_finish_min_rounds"`
+		AutoFinishCoverage    *int  `json:"auto_finish_coverage_pct"`
+		AutoFinishMaxRounds   *int  `json:"auto_finish_max_rounds"`
 		// 意图级软预算（v0.4.28）：单意图 token 上限，500k–20M。
 		IntentBudgetEnabled *bool `json:"intent_budget_enabled"`
 		IntentBudgetTokens  *int  `json:"intent_budget_tokens"`
@@ -3757,6 +3766,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		go s.reconcileConcurrency()
 	}
 	// 任务自动收尾（v0.5.0）：即时生效，下一轮 planner 读取。
+	if req.ReportRecoveryEnabled != nil {
+		if err := s.m.pg.SetBool("report_recovery_enabled", *req.ReportRecoveryEnabled); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	if req.AutoFinishEnabled != nil {
 		if err := s.m.pg.SetBool(settingAutoFinishEnabled, *req.AutoFinishEnabled); err != nil {
 			writeErr(w, 500, err.Error())

@@ -190,6 +190,24 @@ func TestModelCallDeadlineUsesParentTaskAndRun(t *testing.T) {
 	}
 }
 
+func TestModelCallConfiguredBudgetReplacesFallback(t *testing.T) {
+	for _, budget := range []time.Duration{30 * time.Second, 20 * time.Minute, time.Hour} {
+		ctx := withModelCallLimit(t.Context(), budget)
+		call, cancel, limit := modelCallContext(ctx, defaultModelCallTimeout)
+		deadline, ok := call.Deadline()
+		cancel()
+		if !ok || limit > budget || limit < budget-time.Second || time.Until(deadline) < budget-time.Second {
+			t.Fatalf("configured budget %v replaced by %v", budget, limit)
+		}
+	}
+	// Unlimited runs still have a bounded individual network call.
+	call, cancel, limit := modelCallContext(withModelCallLimit(t.Context(), 0), defaultModelCallTimeout)
+	defer cancel()
+	if _, ok := call.Deadline(); !ok || limit > defaultModelCallTimeout || limit < defaultModelCallTimeout-time.Second {
+		t.Fatalf("unlimited run lost network-call protection: %v", limit)
+	}
+}
+
 func TestModelCallRunCapPreservesSDKSettlement(t *testing.T) {
 	calls := 0
 	p := &modelCallTimeoutProvider{timeout: time.Minute, inner: plannerStateProvider{complete: func(_ context.Context, _ llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {

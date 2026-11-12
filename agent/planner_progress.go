@@ -33,12 +33,12 @@ func (g *plannerProgressGuard) validate(ctx context.Context) error {
 	}
 	advanced := after.AdvancedSince(g.before)
 	if g.continuous {
-		advanced = after.ActiveIntents > 0 || after.LatestIntent > g.before.LatestIntent || after.LatestFinding > g.before.LatestFinding
+		advanced = after.ActiveIntents > 0 || after.LatestIntent > g.before.LatestIntent || after.LatestFinding > g.before.LatestFinding || after.EvidenceAdvancedSince(g.before)
 	}
 	if (!g.continuous && after.OpenGoals == 0) || advanced {
 		return nil
 	}
-	return fmt.Errorf("%w：仍有%d个未完成目标，没有待执行/运行中的意图，也没有新意图、漏洞或目标判定；草稿和模型文字不能作为派发回执", ErrPlannerNoProgress, after.OpenGoals)
+	return fmt.Errorf("%w：仍有%d个未完成目标，没有待执行/运行中的意图，也没有新意图、漏洞或实质证据变化；草稿、重复证据和时间戳不能作为执行进展。缺少前置条件时请保存具体阻塞及证据", ErrPlannerNoProgress, after.OpenGoals)
 }
 
 func (g *plannerProgressGuard) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {

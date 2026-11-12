@@ -23,6 +23,7 @@ func TestPlannerFailureClassification(t *testing.T) {
 		{nil, false, ""}, {errors.Join(agent.ErrPlannerModelError, errors.New("synthetic 503")), false, "planner_model_unavailable"},
 		{agent.ErrPlannerNoProgress, false, "planner_no_progress"}, {agent.ErrToolFailureLoop, false, "planner_tool_failure_loop"},
 		{agent.ErrPlannerReadLoop, false, "planner_read_loop"}, {agent.ErrTaskBudgetExpired, true, "task_deadline"},
+		{errors.Join(agent.ErrPlannerModelError, &agent.ModelCallTimeoutError{Limit: 20 * time.Minute}), false, "planner_model_timeout"},
 		{context.DeadlineExceeded, true, "planner_round_timeout"}, {context.Canceled, false, "other"},
 	} {
 		if got := plannerFailureCode(tc.err, tc.timeout); got != tc.code {
@@ -104,7 +105,7 @@ func TestPlannerLoopStopsAfterThreeProviderFailures(t *testing.T) {
 }
 
 func TestPlannerRepeatedFaultStopsWithoutCompletingOrErasingProgress(t *testing.T) {
-	for _, code := range []string{"planner_model_unavailable", "planner_no_progress", "planner_tool_failure_loop", "planner_round_timeout"} {
+	for _, code := range []string{"planner_model_unavailable", "planner_model_timeout", "planner_no_progress", "planner_tool_failure_loop", "planner_round_timeout"} {
 		t.Run(code, func(t *testing.T) {
 			m, err := NewManager(t.TempDir(), "")
 			if err != nil {

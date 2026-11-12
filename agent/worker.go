@@ -454,7 +454,11 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 }
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	parentCtx := ctx
+	ctx, stopRun := context.WithCancelCause(ctx)
+	defer stopRun(nil)
 	tsx := NewToolSet(ts, name)
+	tsx.SetNotifyProgress(ProgressNotifyFromContext(ctx))
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
 	coverageEnabled := as == nil || as.CoverageEnabled(taskID)
@@ -584,6 +588,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		NonStreaming:       w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
 		MaxTokens:          w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
 	}
+	var idleHooks *idleStopHooks
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		// 工具调用可观测：worker 的工具调用此前完全不可观测——journal 里只有 planner
 		// 心跳，worker 死活要靠翻 transcripts/*.jsonl 的 mtime 才确认得到。日志层套在
@@ -593,14 +598,15 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 时长——持续产出的 worker 不会被它打断（深度探索不受影响），空转的会被收。
 		// 详见 agent/idlestop.go 的注释。
 		logged := wrapToolLog(hooks, KindWorker, fmt.Sprintf("%s · #%d", name, intent.ID))
-		opts.Hooks = wrapIdleStop(logged, tsx.Writes, func(reason string) {
+		idleHooks = wrapIdleStop(logged, tsx.Writes, func(reason string) {
 			logIdleStop(name, taskID, intent.ID, reason)
-		})
+		}, stopRun)
 	} else {
-		opts.Hooks = wrapIdleStop(toolLogSink(KindWorker), tsx.Writes, func(reason string) {
+		idleHooks = wrapIdleStop(toolLogSink(KindWorker), tsx.Writes, func(reason string) {
 			logIdleStop(name, taskID, intent.ID, reason)
-		})
+		}, stopRun)
 	}
+	opts.Hooks = idleHooks
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
 		opts.SessionID = WorkerSessionID(ts.ID(), intent.ID)
@@ -664,6 +670,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// still settles (no external hard-timeout backstop needed). ctx itself carries only
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
+	reason, err = workerIdleOutcome(parentCtx, ctx, idleHooks, reason, err)
 	return reason, tsx.Writes(), err
 }
 

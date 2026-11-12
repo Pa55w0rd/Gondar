@@ -1543,14 +1543,14 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			FROM exploration_nodes
 			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
 		) intent_metrics ON true
-		LEFT JOIN LATERAL (
-			SELECT COUNT(*) FILTER (WHERE severity='critical') AS critical,
+		LEFT JOIN (
+			SELECT finding.task_id,COUNT(*) FILTER (WHERE severity='critical') AS critical,
 			       COUNT(*) FILTER (WHERE severity='high')     AS high,
 			       COUNT(*) FILTER (WHERE severity='medium')   AS medium,
 			       COUNT(*) FILTER (WHERE severity='low')      AS low
-			FROM findings
-			WHERE task_id=task.id
-		) finding_metrics ON true
+			FROM findings finding JOIN tasks owner ON owner.id=finding.task_id AND owner.deleted_at IS NULL
+			GROUP BY finding.task_id
+		) finding_metrics ON finding_metrics.task_id=task.id
 		WHERE task.deleted_at IS NULL`)
 	if err != nil {
 		return nil, err

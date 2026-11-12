@@ -89,3 +89,21 @@ func TestPlannerRoundLimitOverride(t *testing.T) {
 		t.Errorf("overridden limit = %v, want 3s", plannerRoundLimit())
 	}
 }
+
+func TestPlannerRoundLimitHonorsConfiguredBudget(t *testing.T) {
+	for _, budget := range []time.Duration{30 * time.Second, 21 * time.Minute, time.Hour, 0} {
+		if got := plannerRoundLimit(budget); got != budget {
+			t.Fatalf("configured %v truncated to %v", budget, got)
+		}
+	}
+	parent, cancel := context.WithCancel(t.Context())
+	ctx, stop := plannerRoundContext(parent, 0)
+	defer stop()
+	if _, ok := ctx.Deadline(); ok || ctx.Err() != nil {
+		t.Fatal("unlimited round expired immediately")
+	}
+	cancel()
+	if ctx.Err() != context.Canceled {
+		t.Fatal("unlimited round ignored parent cancellation")
+	}
+}

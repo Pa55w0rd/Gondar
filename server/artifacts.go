@@ -115,6 +115,16 @@ func (s *Server) RecordArtifact(taskID, findingID int64, runDir, relPath, name, 
 	return s.recordArtifactForIntent(taskID, 0, findingID, runDir, relPath, name, kind, sourceURL, note)
 }
 
+func (s *Server) RecordArtifactWithProgress(taskID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, bool, error) {
+	a, err := s.RecordArtifact(taskID, findingID, runDir, relPath, name, kind, sourceURL, note)
+	return a, err == nil && a != nil && a.NewContent, err
+}
+
+func (s *Server) RecordArtifactForIntentWithProgress(taskID, intentID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, bool, error) {
+	a, err := s.RecordArtifactForIntent(taskID, intentID, findingID, runDir, relPath, name, kind, sourceURL, note)
+	return a, err == nil && a != nil && a.NewContent, err
+}
+
 // RecordArtifactForIntent receives the host-injected Worker identity. Source
 // provenance is stored separately from the manually selected finding binding.
 func (s *Server) RecordArtifactForIntent(taskID, intentID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, error) {
@@ -573,6 +583,11 @@ func (s *Server) recordArtifactAbsForIntent(abs, taskKey string, intentID, findi
 	if err := pg.InsertTaskArtifact(context.Background(), a); err != nil {
 		_ = os.Remove(dst)
 		return nil, fmt.Errorf("登记附件失败：%w", err)
+	}
+	if a.Storage != storage {
+		// Another recorder committed the same content first. Keep its receipt and
+		// remove only the redundant file created by this call.
+		_ = os.Remove(dst)
 	}
 	// Office/PDF 附件异步生成取样预览（v0.4.21），不阻塞 save_evidence。
 	s.enqueueArtifactPreview(a, false)

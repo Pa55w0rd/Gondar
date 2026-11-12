@@ -17,7 +17,8 @@ import (
 // UnlockSkill unlocks a named skill's MCPs — hosts call it to rebuild the unlock set
 // from history on a resumed session (design doc C2).
 type DeferredInfo struct {
-	FindingGuidance string            // derived from the final permitted tools, including DB overrides
+	FindingGuidance string // derived from the final permitted tools, including DB overrides
+	SkillGuidance   string
 	Deferred        []string          // all MCP tool names (schema withheld)
 	GlobalNames     []string          // MCP names to list in the system-prompt block
 	Unlock          *actool.UnlockSet // shared call-gate; nil when no MCP tools
@@ -63,11 +64,24 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	}
 	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
 	def.FindingGuidance += sceneToolGuidance(agentKey, out)
+	for i, tool := range out {
+		if tool.Name() == "Skill" && def.SkillGuidance != "" {
+			// Replace the SDK's longer index instead of adding a second copy.
+			out[i] = skillIndexTool{CoreTool: tool, index: def.SkillGuidance}
+		}
+	}
 	for i, t := range out {
 		out[i] = guardPanic(t)
 	}
 	return out, def, cleanup
 }
+
+type skillIndexTool struct {
+	actool.CoreTool
+	index string
+}
+
+func (t skillIndexTool) Prompt() string { return t.index }
 
 // guardPanic turns a panicking tool handler into an ordinary tool error. The
 // harness runs each tool on its own goroutine, so a panic inside a handler can't

@@ -17,6 +17,9 @@ func sceneToolGuidance(role string, tools []actool.CoreTool) string {
 		has[tool.Name()] = true
 	}
 	var out strings.Builder
+	if has["record_verification"] && has["list_verifications"] {
+		out.WriteString("\n\n**验证覆盖账本**：用list_verifications复用已保存的逐格证据，用record_verification按确切端点、输入、身份、方法与对照变体增量保存。not_tested不算执行；blocked/missing_prerequisite/inconclusive保留未验证缺口；negative只约束当前格，不能外推全部接口安全。只在实质内容变化时保存修订；缺少实际证据不编造confirmed，不凭fact资产锚定覆盖率或已有漏洞数量宣告全面完成。长验证链按阶段保存真实证据，不等最后一轮一次性写回。")
+	}
 	out.WriteString("\n\n**场景核验卡与工具前置**：遵守本任务描述中选定的场景、目标清单和预算。核验卡写清对象、前置、假设、最小证明、停止条件和结果出处；批量任务逐目标记录，不能把同类方法复用当成整批已验证。")
 	if role == "planner" {
 		out.WriteString("你负责把卡拆为少量有前置依赖的意图；等待中的依赖不重复派发，未执行的卡不能计为已测。")

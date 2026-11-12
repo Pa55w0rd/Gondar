@@ -23,14 +23,15 @@ type failedToolCall struct {
 // Observe SDK result events, rather than only hooks: schema validation and
 // permission failures can return before PreToolUse/PostToolUse are invoked.
 type toolFailureLoop struct {
-	pending map[string]failedToolCall
-	last    [32]byte
-	streak  int
-	schema  int
-	recent  [][32]byte
-	planner bool
-	errors  int
-	byTool  map[string]map[[32]byte]int
+	pending         map[string]failedToolCall
+	last            [32]byte
+	streak          int
+	schema          int
+	recent          [][32]byte
+	planner         bool
+	errors          int
+	byTool          map[string]map[[32]byte]int
+	unchangedWrites [][32]byte
 }
 
 func (g *toolFailureLoop) start(id, name string, input []byte) {
@@ -51,6 +52,25 @@ func (g *toolFailureLoop) start(id, name string, input []byte) {
 func (g *toolFailureLoop) result(id string, failed bool, output string) error {
 	call, known := g.pending[id]
 	delete(g.pending, id)
+	if known && !failed && (call.name == "record_fact" || call.name == "save_evidence" || call.name == "record_verification") {
+		key := sha256.Sum256(append(call.key[:], []byte(strings.TrimSpace(output))...))
+		g.unchangedWrites = append(g.unchangedWrites, key)
+		if len(g.unchangedWrites) > 6 {
+			g.unchangedWrites = g.unchangedWrites[len(g.unchangedWrites)-6:]
+		}
+		identical := len(g.unchangedWrites) == 6
+		for _, prior := range g.unchangedWrites {
+			if prior != key {
+				identical = false
+				break
+			}
+		}
+		if identical {
+			return fmt.Errorf("%w：工具%s连续返回相同写回回执，没有新内容；已保留已有证据并停止重复提交", ErrToolFailureLoop, call.name)
+		}
+	} else if !failed {
+		g.unchangedWrites = nil
+	}
 	if g.planner && known {
 		if !failed {
 			delete(g.byTool, call.name)

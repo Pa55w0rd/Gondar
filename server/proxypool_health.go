@@ -30,12 +30,22 @@ func (m *Manager) StartProxyPoolHealthCheck() {
 		log.Printf("[proxypool] 主动健康检查已关闭（proxypool_health_minutes=0）")
 		return
 	}
+	ctx := m.managerBackgroundContext()
+	m.backgroundWG.Add(1)
 	go func() {
+		defer m.backgroundWG.Done()
 		// 启动延迟：避开进程刚起来的流量高峰，也给 hostd/traffic 代理留出时间。
-		time.Sleep(90 * time.Second)
+		if !waitManagerBackground(ctx, 90*time.Second) {
+			return
+		}
 		for {
+			if ctx.Err() != nil {
+				return
+			}
 			m.RunProxyPoolHealthCheck()
-			time.Sleep(interval)
+			if !waitManagerBackground(ctx, interval) {
+				return
+			}
 		}
 	}()
 }
@@ -67,7 +77,7 @@ func (m *Manager) RunProxyPoolHealthCheck() {
 		return
 	}
 	cooldown := time.Duration(intSetting(m.pg, settingProxyHealthCooldown, defaultProxyHealthCooldown)) * time.Minute
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(m.managerBackgroundContext(), 2*time.Minute)
 	defer cancel()
 
 	results := s_probeAll(ctx, m, enabled, target)

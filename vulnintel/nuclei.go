@@ -45,7 +45,7 @@ func EnsureTemplates(ctx context.Context, dir, proxy string) error {
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".git")); err == nil {
 		// update: fetch + fast-forward only, ignore local drift
-		cmd := exec.CommandContext(ctx, "git", "-C", dir, "pull", "--ff-only", "--quiet")
+		cmd := templateGitCommand(ctx, "-C", dir, "pull", "--ff-only", "--quiet")
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -64,7 +64,7 @@ func EnsureTemplates(ctx context.Context, dir, proxy string) error {
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "git", "clone", "--depth", "1", "--single-branch", "--quiet",
+	cmd := templateGitCommand(ctx, "clone", "--depth", "1", "--single-branch", "--quiet",
 		"https://github.com/projectdiscovery/nuclei-templates.git", dir)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
@@ -75,6 +75,13 @@ func EnsureTemplates(ctx context.Context, dir, proxy string) error {
 		return fmt.Errorf("nuclei templates clone（残留已清理，等下轮重试）: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	return verifyTemplates(dir)
+}
+
+func templateGitCommand(ctx context.Context, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.WaitDelay = 3 * time.Second
+	configureTemplateCancellation(cmd)
+	return cmd
 }
 
 // verifyTemplates 克隆/拉取成功后的内容校验：模板树一个 yaml 都没有 = 无效

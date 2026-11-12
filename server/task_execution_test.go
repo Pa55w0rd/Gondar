@@ -211,7 +211,7 @@ func TestInterruptedPlannerResponseStillCountsTowardFaultProtection(t *testing.T
 	}
 	stored, _ := m.pg.GetTask(id)
 	g, _ := task.Store.GetNode(goal)
-	if stored.Status != "failed" || g == nil || g.State != "open" {
+	if !stored.Paused || stored.Status == "failed" || stored.Status == "done" || g == nil || g.State != "open" {
 		t.Fatalf("interruption bypassed protection or erased progress: %+v", stored)
 	}
 }

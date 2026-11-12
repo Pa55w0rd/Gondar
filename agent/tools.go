@@ -77,6 +77,7 @@ type ToolSet struct {
 	findingRecorder FindingRecorder
 	// artifactRecorder 由 host 注入（v0.5.0 证据附件）；nil=当前环境不支持存档。
 	artifactRecorder ArtifactRecorder
+	artifactProgress map[string]bool // 本run已计入进展的证据内容，不接受模型自行声明
 	// runDir 是本次运行的专属工作目录（worker 在这里产生截图/样本），
 	// save_evidence 的相对路径基准；由 Worker.Execute 注入。
 	runDir string
@@ -115,7 +116,8 @@ type ToolSet struct {
 	// notify, if set, wakes the task's planner after a graph change that should be
 	// re-planned promptly (currently: a new hint). nil = no wake (the hint is still
 	// stored and read on the next round triggered by other events). debounced.
-	notify func()
+	notify         func()
+	notifyProgress func() // 仅真实保存的进展唤醒调度；由host装配
 	// notifyFinding, if set, wakes the task's planner when this run reports a finding,
 	// carrying (intentID, summary) so the round can spell out which intent found what.
 	// Wired for workers; nil elsewhere → falls back to notify (bare wake).
@@ -181,18 +183,19 @@ type EnrichTrigger interface {
 // findings under "facts" (record_fact → Facts, insert_assets → Assets,
 // report_finding → Findings; each element of a batch counts once).
 type WriteCounts struct {
-	Facts    int
-	Assets   int
-	Findings int
+	Facts     int
+	Assets    int
+	Findings  int
+	Artifacts int
 }
 
 // Total is every node persisted this run, regardless of kind — the
 // "explored but persisted nothing" signal (Total == 0).
-func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings }
+func (w WriteCounts) Total() int { return w.Facts + w.Assets + w.Findings + w.Artifacts }
 
 // String renders the per-kind breakdown for logs, e.g. "事实1 资产25 漏洞0".
 func (w WriteCounts) String() string {
-	return fmt.Sprintf("事实%d 资产%d 漏洞%d", w.Facts, w.Assets, w.Findings)
+	return fmt.Sprintf("事实%d 资产%d 漏洞%d 附件%d", w.Facts, w.Assets, w.Findings, w.Artifacts)
 }
 
 // Writes reports what this run wrote back, split by node kind (so the engine can
@@ -340,21 +343,6 @@ func clampIntentSummary(s string) string {
 	head := string([]rune(s)[:maxIntentSummaryRunes])
 	return head + "…（summary 超长已截断，细节请写进 fact 的 detail）"
 }
-
-// maxContinuationDepth 是同一条方向上允许的最大接续代数。
-//
-// 3 的由来：接续不是坏事——一条方向被预算掐断、但确实有明确的下一步时，
-// 接一次是对的（实测线上 205 条意图里 26 条是接续）。问题在于**没有闸**：
-// 线上出现过三代接续（#635 → #578 → #660），每一代都从零重建上下文、重复读
-// 同一批文件、重复扫同一批资产。
-//
-// 3 意味着：一条方向最多被接续 3 次（首探 + 3 次接续 = 4 代）。到这个数还
-// 没拿到结果，说明问题不在「时间不够」而在「这条路本身不通」或「打法不对」，
-// 该换方向了，不该继续接。
-//
-// 刻意不取 2：接续两次是常见且合理的（被重启打断 + 被预算掐断），卡太紧会
-// 误杀正当的深挖。
-const maxContinuationDepth = db.MaxIntentContinuationDepth
 
 // continuationDepthOf 读一个意图节点上记录的接续代数。
 //
@@ -571,7 +559,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	if page, err := t.ts.ListVerifications(context.Background(), db.VerificationFilter{Limit: 1}); err == nil {
+		out["verification"] = map[string]any{"recorded_cases": page.RecordedCases, "states": page.LatestStates, "scope": "只统计最新验证格；未登记不等于已测，资产事实锚定率不代表输入/身份全覆盖"}
+	}
+	out["facts"] = len(factNodes) // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -1244,10 +1235,10 @@ type intentItem struct {
 	// 文字形态接续有两个坏处：
 	//  1. **算不出代数**。#660 接续 #635、#635 接续 #578，但图里 #660 的 parent
 	//     是 #14（一个 fact）——接续关系在数据层根本没表达，所以「这条链已经接了
-	//     几代」无法回答。而接续代数正是防止无限续派的关键闸门。
+	//     几代」无法回答。代数只作追踪，停滞保护按真实证据内容判断。
 	//  2. **查不了**。想找「所有接续自 #578 的意图」只能全表扫 summary 文本。
 	//
-	// 结构化之后：接续代数可算、可查、可限。parent_ids 语义不变（只能挂
+	// 结构化之后：接续代数可算、可查，真实停滞另作校验。parent_ids 语义不变（只能挂
 	// fact/finding，意图必须锚在已确认知识上）——continues 是**额外**的接续
 	// 标记，不替代 parent_ids。
 	Continues []json.RawMessage `json:"continues"`
@@ -1311,11 +1302,6 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		if d := continuationDepthOf(cn); d+1 > depth {
 			depth = d + 1
 		}
-	}
-	if depth > maxContinuationDepth {
-		return 0, fmt.Errorf("接续代数已达上限（%d 代）：这条方向已经被接续了 %d 次，继续接下去大概率是在重复劳动。"+
-			"请改为：①换一种本质不同的打法（换入口/换方法/换目标面）；②或直接放弃这个方向，转向尚未覆盖的方向",
-			maxContinuationDepth, depth)
 	}
 	anchors := pidList(it.AssetIDs)
 	// 资产拦截：意图绑定的资产若命中系统资产拦截规则，则禁止下发该意图。
@@ -1716,14 +1702,16 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 			assetIDs = auto
 		}
 	}
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, assetIDs)
+	id, created, err := t.ts.RecordFact(payload, 5, t.worker, assetIDs, intent)
 	if err != nil {
 		return 0, err
 	}
-	if intent > 0 {
-		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
+	if created {
+		t.writes.Facts++
+		if t.notifyProgress != nil {
+			t.notifyProgress()
+		}
 	}
-	t.writes.Facts++
 	// 事实已经写下去了，但锚点里指向不存在资产的边被丢弃了。把这件事告诉模型，
 	// 它下次就知道该 asset id 根本不存在——否则它会一直用同一个假 id，
 	// 而 planner 看到的资产链路里会少掉本该关联的资产。
@@ -2518,6 +2506,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
+		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		t.listArtifacts(), t.previewEvidence(), t.proposeLesson(), t.recallLessons(),
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),

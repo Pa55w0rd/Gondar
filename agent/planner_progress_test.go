@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,9 +13,9 @@ import (
 	"gondar/db"
 )
 
-func TestPlannerBudgetsAreBoundedAndHonorShorterConfiguration(t *testing.T) {
+func TestPlannerBudgetsHonorConfigurationAndKeepBoundedSettlement(t *testing.T) {
 	p := NewPlanner(nil, "", "", nil, 0, 0)
-	if plannerTurnBudget(0) != 24 || plannerTurnBudget(7) != 7 || p.runDuration() != 5*time.Minute || p.RoundLimit() != 6*time.Minute {
+	if plannerTurnBudget(0) != 24 || plannerTurnBudget(7) != 7 || p.runDuration() != 20*time.Minute || p.RoundLimit() != 21*time.Minute {
 		t.Fatal("unconfigured planner has no finite defaults")
 	}
 	p.SetRunTimeout(30 * time.Second)
@@ -22,8 +23,47 @@ func TestPlannerBudgetsAreBoundedAndHonorShorterConfiguration(t *testing.T) {
 		t.Fatal("shorter budget was ignored")
 	}
 	p.SetRunTimeout(time.Hour)
-	if p.runDuration() != 5*time.Minute {
-		t.Fatal("configured budget bypassed the main exploration ceiling")
+	if p.runDuration() != time.Hour || p.RoundLimit() != 61*time.Minute {
+		t.Fatal("longer configured budget was truncated")
+	}
+	p.SetRunTimeout(0)
+	if p.runDuration() != 0 || p.RoundLimit() != 0 || p.FinalRoundLimit() != 3*time.Minute {
+		t.Fatal("unlimited exploration changed bounded final settlement")
+	}
+}
+
+func TestPlannerConfiguredBudgetReachesModelAndPrompt(t *testing.T) {
+	d := testDB(t)
+	defer d.Close()
+	task, err := d.CreateTask("configured planner budget", "synthetic only", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	calls := 0
+	provider := &modelCallTimeoutProvider{timeout: defaultModelCallTimeout, inner: plannerStateProvider{complete: func(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) < 19*time.Minute {
+			t.Fatalf("configured twenty-minute call truncated: %v", time.Until(deadline))
+		}
+		raw, _ := json.Marshal(req.Messages)
+		if !strings.Contains(string(raw), "主探索最多20m0s") || strings.Contains(string(raw), "主探索最多5分钟") {
+			t.Fatal("planner prompt advertises a stale time budget")
+		}
+		if calls == 1 {
+			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: "configured-dispatch", Name: "add_intent", Input: json.RawMessage(`{"intents":[{"summary":"synthetic local verification","priority":1}]}`)}}}, "tool_use", llm.Usage{}, nil
+		}
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("已提交本轮方向")}}, "end_turn", llm.Usage{}, nil
+	}}}
+	p := NewPlanner(provider, "fixture", t.TempDir(), nil, 10000, 4)
+	p.SetRunTimeout(20 * time.Minute)
+	p.SetNonStreaming(func() bool { return true })
+	if _, _, err := p.Plan(t.Context(), task.ID, nil, d.Exploration(task.ExplorationID), task.Goal, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("model calls=%d", calls)
 	}
 }
 

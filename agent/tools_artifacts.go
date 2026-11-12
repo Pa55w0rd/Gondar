@@ -16,6 +16,12 @@ type ArtifactRecorder interface {
 	RecordArtifact(taskID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, error)
 }
 
+// ArtifactProgressRecorder returns an atomic host receipt. Only newly saved
+// content counts as progress; duplicate registration or metadata edits do not.
+type ArtifactProgressRecorder interface {
+	RecordArtifactWithProgress(taskID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, bool, error)
+}
+
 // ListTaskArtifacts 是 host 注入的附件列表读取（agent 工具用）。nil = 不可用。
 var ListTaskArtifacts func(taskID string) ([]db.TaskArtifact, error)
 
@@ -66,13 +72,41 @@ func (t *ToolSet) saveEvidence() actool.CoreTool {
 			if t.runDir == "" {
 				return actool.Errorf("save_evidence 需要当前运行目录（内部未注入）"), nil
 			}
-			rec, err := t.artifactRecorder.RecordArtifact(t.taskID, a.FindingID, t.runDir, a.Path, a.Name, a.Kind, a.SourceURL, a.Note)
+			var rec *db.TaskArtifact
+			var err error
+			var created bool
+			if host, ok := t.artifactRecorder.(ArtifactProgressRecorder); ok {
+				rec, created, err = host.RecordArtifactWithProgress(t.taskID, a.FindingID, t.runDir, a.Path, a.Name, a.Kind, a.SourceURL, a.Note)
+			} else {
+				rec, err = t.artifactRecorder.RecordArtifact(t.taskID, a.FindingID, t.runDir, a.Path, a.Name, a.Kind, a.SourceURL, a.Note)
+			}
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
 			}
+			if rec == nil || rec.ID <= 0 {
+				return actool.Errorf("证据存储没有返回有效的附件回执；未计入进展"), nil
+			}
+			progress := false
+			if created {
+				key := rec.SHA256
+				if key == "" {
+					key = "id:" + strconv.FormatInt(rec.ID, 10)
+				}
+				if t.artifactProgress == nil {
+					t.artifactProgress = make(map[string]bool)
+				}
+				if !t.artifactProgress[key] {
+					t.artifactProgress[key] = true
+					t.writes.Artifacts++
+					progress = true
+					if t.notifyProgress != nil {
+						t.notifyProgress()
+					}
+				}
+			}
 			out, _ := json.Marshal(map[string]any{
 				"artifact_id": rec.ID, "name": rec.Name, "kind": rec.Kind,
-				"size_bytes": rec.SizeBytes, "note": rec.Note,
+				"size_bytes": rec.SizeBytes, "note": rec.Note, "new_content": progress,
 			})
 			return actool.Text(fmt.Sprintf("evidence saved: artifact %d\n%s\n报告撰写时可用 ![说明](artifact:%d) 引用这张图。", rec.ID, out, rec.ID)), nil
 		})

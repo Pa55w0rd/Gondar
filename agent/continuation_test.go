@@ -68,13 +68,6 @@ func TestContinuationDepthAccumulates(t *testing.T) {
 	}
 }
 
-// 接续代数上限必须是 3——2 太紧（误杀正当深挖），4+ 太松（挡不住无限接续）。
-func TestMaxContinuationDepthValue(t *testing.T) {
-	if maxContinuationDepth != 3 {
-		t.Fatalf("接续代数上限应为 3,got %d", maxContinuationDepth)
-	}
-}
-
 // intentItem 必须能解析 continues 字段。
 func TestIntentItemParsesContinues(t *testing.T) {
 	var it intentItem

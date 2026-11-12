@@ -11,6 +11,9 @@ import (
 type TaskArtifact struct {
 	ID     int64  `json:"id"`
 	TaskID string `json:"task_id"`
+	// NewContent is a transient committed-insert receipt, never persisted or
+	// exposed as task evidence. Loaded/deduplicated artifacts always leave it false.
+	NewContent bool `json:"-"`
 	// FindingID 可选：这张图/这个样本证明哪个漏洞（worker 报完漏洞后登记时带上）。
 	// 0 = 任务级材料（如目标首页截图），不进单个漏洞的详情页。
 	FindingID int64 `json:"finding_id,omitempty"`
