@@ -102,6 +102,10 @@ jobs:
           cp install.sh docker-compose.yml README.md dist/
           cp .env.example dist/env.example
           cp deployment/release-public-key.txt dist/
+          # 新装模板必须跟随本次发行，避免发布新版却默认拉取旧镜像。
+          expected="${GITHUB_REF_NAME#v}"
+          tr -d '\r' < dist/env.example | grep -Fx "GONDAR_TAG=$expected"
+          tr -d '\r' < dist/docker-compose.yml | grep -Fq "\${GONDAR_TAG:-$expected}"
       - name: Generate checksums
         working-directory: dist
         run: sha256sum *.zip install.sh docker-compose.yml README.md env.example release-public-key.txt > SHA256SUMS
