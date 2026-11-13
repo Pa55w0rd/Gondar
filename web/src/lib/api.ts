@@ -1,3 +1,5 @@
+import { fetchUpdateJSON, type ExpectedUpdate, type UpdateAcknowledgement, type UpdateStatus } from "./update-confirmation";
+import { llmTestRequest, type LLMTestRequest } from "./llm-test-request";
 // Real backend client. /api/* is proxied to the Go backend (next.config rewrites).
 // Returns the domain types in lib/types.ts. Shapes match the backend handlers;
 // a few fields the backend serializes differently (e.g. created_at as a unix int)
@@ -26,6 +28,8 @@ import type {
   ChatAttachment,
   CommandRecord,
   Company,
+  CompanyName,
+  CompanyPage,
   CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
@@ -100,6 +104,7 @@ import type {
   TaskCategory,
   TaskConstraint,
   TaskGoal,
+  TaskFileListing,
   TaskLLMResolutions,
   TaskNode,
   TaskScopeRow,
@@ -312,6 +317,7 @@ export const api = {
     seedFirstIntent?: boolean;
     planHeartbeatSeconds?: number;
     coverageEnabled?: boolean;
+    assetContextMode?: "declared_scope" | "task_sources";
     interceptRules?: AssetInterceptRuleInput[];
     authConfig?: TaskAuthConfigInput;
   }) =>
@@ -328,12 +334,13 @@ export const api = {
       seed_first_intent: input.seedFirstIntent ?? false,
       plan_heartbeat_seconds: input.planHeartbeatSeconds ?? 0, // 0 = 后端归一到默认 600(10min)
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
+      asset_context_mode: input.assetContextMode ?? "declared_scope",
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       // 任务级登录凭据（v0.4.8）：密码/TOTP 只进 DB，API 永不回传。
       auth_config: input.authConfig?.enabled ? input.authConfig : undefined,
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
-  updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
+  updateTask: (id: string, input: { name?: string; pinned?: boolean; asset_context_mode?: "declared_scope" | "task_sources" }) => patch<Task>(`/tasks/${id}`, input),
 	updateTaskExecution: (id: string, input: { completion_mode?: "objective" | "continuous"; timeout_seconds?: number }) =>
 	  patch<Task>(`/tasks/${encodeURIComponent(id)}/execution`, input),
 	continueTask: (id: string) => post<{ id: string; queued: boolean; status: string }>(`/tasks/${encodeURIComponent(id)}/continue`),
@@ -491,6 +498,25 @@ export const api = {
   // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
   taskAssetRefs: (id: string, assetId: number) => get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
 
+  taskFiles: (id: string, path = "", recent = false, signal?: AbortSignal) =>
+    http<TaskFileListing>(`/tasks/${encodeURIComponent(id)}/files/${recent ? "recent" : "list"}?path=${encodeURIComponent(path)}`, { signal }),
+  taskFileRead: (id: string, path: string, signal?: AbortSignal) =>
+    http<WorkspaceFile>(`/tasks/${encodeURIComponent(id)}/files/read?path=${encodeURIComponent(path)}`, { signal }),
+  taskFileDownload: async (id: string, path: string, zip = false, signal?: AbortSignal) => {
+    const token = getToken();
+    const response = await fetch(`/api/tasks/${encodeURIComponent(id)}/files/${zip ? "zip" : "download"}?path=${encodeURIComponent(path)}`, {
+      signal, headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+    if (!response.ok) {
+      let message = `文件下载失败：${response.status}`;
+      try { const data = await response.json(); if (typeof data.error === "string") message = data.error; } catch { /* use HTTP status */ }
+      throw Object.assign(new Error(message), { status: response.status });
+    }
+    const blob = await response.blob();
+    signal?.throwIfAborted();
+    triggerBlobDownload(blob, downloadFilename(response.headers.get("Content-Disposition") ?? "", zip ? `gondar-task-${id}.zip` : path.split("/").pop() || "download"));
+  },
+
   // ---- workspace file manager (workDir) ----
   workspaceList: (path = "") => get<WorkspaceListing>(`/workspace/list?path=${encodeURIComponent(path)}`),
   workspaceRead: (path: string) => get<WorkspaceFile>(`/workspace/read?path=${encodeURIComponent(path)}`),
@@ -573,6 +599,12 @@ export const api = {
 
   // ---- companies (企业 + 资产范围；归属唯一来源) ----
   companies: () => get<Company[]>("/companies").then(arr),
+  companyNames: () => get<CompanyName[]>("/companies?names_only=1").then(arr),
+  companiesPage: (page = 1, pageSize = 20, query = "") => {
+    const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+    if (query.trim()) params.set("q", query.trim());
+    return get<CompanyPage>(`/companies?${params.toString()}`).then((value) => ({ ...value, items: arr(value.items) }));
+  },
   createCompany: (name: string, scope: CompanyScopeRule[]) =>
     post<{ id: number; created: boolean; scope_added?: number; scope_invalid?: number; scope_errors?: string[] }>(
       "/companies",
@@ -617,7 +649,11 @@ export const api = {
   // 节点带子树聚合计数。不分页——树是导航结构,一次取完。
   findingAssetTree: (q: Omit<FindingQuery, "page" | "pageSize">) =>
     get<FindingAssetTree>(`/exploration/findings/asset-tree?${findingFilterParams(q).toString()}`),
-  findingStats: () => get<FindingStats>("/exploration/findings/stats"),
+  findingStats: (q?: Omit<FindingQuery, "page" | "pageSize">) => {
+    const params = q ? findingFilterParams(q) : new URLSearchParams();
+    if (q) params.set("filtered", "1");
+    return get<FindingStats>(`/exploration/findings/stats?${params.toString()}`);
+  },
   // exportFindings 触发发现页导出并下载文件。scope=selected 时传 ids(finding_id 列表);
   // scope=filtered 时传当前筛选(沿用 FindingQuery 的筛选字段);scope=all 忽略筛选。
   exportFindings: async (opts: {
@@ -929,6 +965,7 @@ export const api = {
   // Run a real "test" search with the given (or saved) config to verify it works.
   testWebSearch: (patch: {
     web_search_backend?: string;
+    deepseek_search_api_key?: string;
     web_search_proxy?: string;
     brave_search_api_key?: string;
     tavily_search_api_key?: string;
@@ -1122,30 +1159,19 @@ export const api = {
     context_window_k = 0,
   ) => post("/llm", { provider, model, base_url, proxy, api_key, rate_per_second, rate_per_minute, context_window_k }),
   testLLM: (
-    provider: string,
-    model: string,
-    base_url: string,
-    api_key: string,
+    provider: string | LLMTestRequest,
+    model?: string,
+    base_url?: string,
+    api_key?: string,
     proxy = "",
     thinking_type = "",
     reasoning_effort = "",
     profile_id?: number,
-    streaming = true, // 用该配置真实的收发模式来测，别让"流式能通、非流式不通"漏到会话里
-    session_header_key = "", // 非空=测试请求也带该自定义会话头（值为一次性 session id）
-  ) =>
-    // reply = 模型实际回复(已截断);一个字都不回的配置后端直接判失败
-    post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>("/llm/test", {
-      provider,
-      model,
-      base_url,
-      proxy,
-      api_key,
-      thinking_type,
-      reasoning_effort,
-      profile_id,
-      streaming,
-      session_header_key,
-    }),
+    streaming = true,
+    session_header_key = "",
+  ) => post<{ ok: boolean; error?: string; latency_ms?: number; model?: string; reply?: string }>(
+    "/llm/test", llmTestRequest(provider, model, base_url, api_key, proxy, thinking_type, reasoning_effort, profile_id, streaming, session_header_key),
+  ),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
     id?: number; // omit/0 = create; set = update that profile
@@ -1504,7 +1530,15 @@ export const api = {
   // 留给用户显式点「检查更新」时用。
   checkUpdate: (force = false) => get<UpdateCheck>(`/update/check${force ? "?force=1" : ""}`),
   // 202 即返回，实际下载在后台跑，进度走 /api/update/stream。
-  applyUpdate: () => post<{ ok: boolean; target: string }>(`/update/apply`),
+  applyUpdate: (request?: { request_id: string; target_version: string }, signal?: AbortSignal) => fetchUpdateJSON<UpdateAcknowledgement>(
+    "/api/update/apply", { method: "POST", body: JSON.stringify(request ?? {}), signal }, getToken(),
+  ),
+  updateStatus: (expected: ExpectedUpdate, signal?: AbortSignal) => {
+    const query = new URLSearchParams({ request_id: expected.request_id });
+    if (expected.operation_id) query.set("operation_id", expected.operation_id);
+    return fetchUpdateJSON<UpdateStatus>(`/api/update/status?${query}`, { signal }, getToken());
+  },
+  updateRuntimeVersion: (signal?: AbortSignal) => fetchUpdateJSON<{ version: string }>("/api/version", { signal }, getToken()),
   rollbackUpdate: () => post<{ ok: boolean }>(`/update/rollback`),
 
   // ---- C2 出口 / 回连接收器（红队作战）----

@@ -5,6 +5,7 @@ export type TaskStatus = "created" | "queued" | "running" | "paused" | "done" | 
 export type EngineMode = "exploring" | "paused" | "stalled" | "idle";
 
 export interface Task {
+	asset_context_mode?: "declared_scope" | "task_sources";
 	planner_wait?: { kind: "missing_prerequisite" | "environment_blocked" | "no_executable_candidates"; reason: string; verification_ids: string[]; remaining_steps: string[] };
 	completion_mode?: "objective" | "continuous";
 	timeout_seconds?: number;
@@ -369,6 +370,18 @@ export interface WorkspaceFile {
   content?: string;
 }
 
+export interface TaskFileEntry extends WorkspaceEntry { link?: boolean }
+export interface TaskFileListing {
+  task_id: string;
+  path: string;
+  entries: TaskFileEntry[];
+  read_only: boolean;
+  truncated?: boolean;
+  limit: number;
+  captured_at?: number;
+  scan?: { scanned: number; skipped_links: string[]; truncated: boolean; truncation_reason?: string };
+}
+
 // 任务测试范围的一条（覆盖度分母 + 授权边界）。
 export interface TaskScopeRow {
   id: number;
@@ -420,6 +433,18 @@ export interface Company {
   logo?: string; // 远程图标 URL；空则前端用名称首字母
   asset_count: number;
   scope?: ScopeRow[];
+}
+
+export interface CompanyName {
+  id: number;
+  name: string;
+}
+
+export interface CompanyPage {
+  items: Company[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 // ---- Exploration graph (per task) ----
@@ -512,6 +537,7 @@ export interface FindingAsset {
 }
 
 export interface Finding {
+  report_source?: FindingReportSource;
   traffic_count?: number;
   evidence_version?: number;
   report_evidence_version?: number;
@@ -533,6 +559,30 @@ export interface Finding {
   inherited?: boolean;
   assets?: FindingAsset[];
   ts: string;
+}
+
+export interface FindingReportSource {
+  version: number;
+  kind: "conversation" | "recovery_job";
+  finding_id: string;
+  finding_node_id: string;
+  task_id: string;
+  evidence_version: number;
+  report_sha256: string;
+  conversation_id?: string;
+  conversation_created_at?: string;
+  conversation_agent_key?: string;
+  run_id?: string;
+  prompt_id?: string;
+  invocation_id?: string;
+  tool_use_id?: string;
+  recovery_id?: string;
+  recovery_attempt?: number;
+  session_id?: string;
+  recorded_at: string;
+  archived?: boolean;
+  available: boolean;
+  unavailable_reason?: string;
 }
 
 // FindingsPage 是发现列表的服务端分页响应。
@@ -571,14 +621,19 @@ export interface FindingDeepenResponse {
   queued: boolean;
 }
 
-// FindingStats 是发现全表聚合(统计卡 + 漏洞类型下拉),服务端计算,不受分页影响。
-export interface FindingStats {
+export interface FindingCounts {
   total: number;
   pending: number;
   critical: number;
   high: number;
   medium: number;
   low: number;
+}
+
+// 全库汇总与筛选项保持原语义；filtered 与当前列表筛选一致，均不受分页影响。
+export interface FindingStats extends FindingCounts {
+  filtered?: FindingCounts;
+  archived_total?: number;
   vulnclasses: string[];
   tasks: FindingTaskOption[];
 }
@@ -641,6 +696,7 @@ export const FINDING_UNASSIGNED_ASSET = "__none__";
 export type ActivityKind =
   | "tool_use"
   | "tool_result"
+  | "tool_late_result" // later host receipt; never overwrites an interrupted result
   | "text"
   | "thinking"
   | "result"
@@ -660,6 +716,29 @@ export interface ChatAttachment {
   abs?: string; // 绝对路径(scope=staging 暂存上传时返回;建任务前把它写进描述)
 }
 
+export interface ToolCallIdentity {
+  version: number;
+  run_id: string;
+  prompt_id: string;
+  invocation_id: string;
+  tool_use_id: string;
+  tool_name: string;
+  turn: number;
+  call_index: number;
+}
+
+export interface ToolOutcome extends ToolCallIdentity {
+  phase: "registered" | "result" | "late_receipt";
+  kind: string;
+  execution_state: "not_executed" | "executed" | "unknown";
+  source: string;
+  reason_code?: string;
+  rule_id?: number;
+  original_input_digest?: string;
+  effective_input_digest?: string;
+  correction_paths?: string[];
+}
+
 export interface Activity {
   seq: number;
   intent_id?: string;
@@ -672,7 +751,10 @@ export interface Activity {
   summary: string;
   detail?: string;
   metadata?: {
+    activity_origin?: string;
     llm_transition?: LLMTransition;
+    tool_call_identity?: ToolCallIdentity;
+    tool_outcome?: ToolOutcome;
   };
   source_task_id?: string;
   inherited?: boolean;
@@ -1027,7 +1109,9 @@ export interface Settings {
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;
-  web_search_backend: string; // "ddgs" | "brave-free" | "tavily" | "deepseek"
+  web_search_backend: string; // "ddgs" | "brave-free" | "tavily" | "deepseek" | "deepseek-search"
+  deepseek_search_key_set?: boolean;
+  deepseek_search_api_key?: string; // 只写，独立Search/Fetch密钥，不借用主模型
   brave_key_set: boolean;
   tavily_key_set: boolean;
   // write-only: only sent on PUT to store/clear the key.
@@ -1763,6 +1847,8 @@ export interface UpdateProgress {
   message: string;
   version?: string;
   error?: string;
+  operation_id?: string;
+  request_id?: string;
 }
 
 // Original execution selected from an approval, never submitted to the reviewer.

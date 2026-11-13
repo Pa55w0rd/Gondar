@@ -26,6 +26,10 @@ import (
 const (
 	// MaxCapturePerSession 是单个会话捕获的字节上限（防灌爆）。
 	MaxCapturePerSession = 64 * 1024
+	// History and live sockets have separate bounds: old closed records may be
+	// retired, but reaching the live bound never evicts an established session.
+	MaxSessionsPerListener    = 2000
+	MaxConnectionsPerListener = 256
 	// MinPort/MaxPort 是允许绑定的端口范围。
 	MinPort = 1024
 	MaxPort = 65535
@@ -51,17 +55,72 @@ type Listener struct {
 	StartedAt time.Time  `json:"started_at"`
 	Sessions  []*Session `json:"sessions"`
 
-	mu   sync.Mutex
-	ln   net.Listener
-	ctx  context.Context
-	stop context.CancelFunc
+	mu              sync.Mutex
+	ln              net.Listener
+	ctx             context.Context
+	stop            context.CancelFunc
+	acceptDone      chan struct{}
+	readers         sync.WaitGroup
+	connections     map[net.Conn]*Session
+	sessionLimit    int
+	connectionLimit int
+	rejected        uint64
 }
 
-// appendSession 记录新连接。
-func (l *Listener) appendSession(s *Session) {
+// Stats is a locked snapshot, rather than live fields exposed during capture.
+type Stats struct {
+	ActiveConnections   int    `json:"active_connections"`
+	RetainedSessions    int    `json:"retained_sessions"`
+	RejectedConnections uint64 `json:"rejected_connections"`
+	SessionLimit        int    `json:"session_limit"`
+	ConnectionLimit     int    `json:"connection_limit"`
+}
+
+func (l *Listener) Stats() Stats {
 	l.mu.Lock()
+	defer l.mu.Unlock()
+	return Stats{len(l.connections), len(l.Sessions), l.rejected, l.sessionLimit, l.connectionLimit}
+}
+
+func newListener(name string, port int, ln net.Listener, sessions, connections int) *Listener {
+	ctx, stop := context.WithCancel(context.Background())
+	return &Listener{Name: name, Port: port, StartedAt: time.Now(), ln: ln, ctx: ctx, stop: stop,
+		acceptDone: make(chan struct{}), connections: make(map[net.Conn]*Session),
+		sessionLimit: sessions, connectionLimit: connections}
+}
+
+// registerSession runs before starting a reader, so a connection flood cannot
+// create an unbounded number of reader goroutines while waiting for admission.
+func (l *Listener) registerSession(conn net.Conn) (*Session, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ctx.Err() != nil {
+		return nil, false
+	}
+	if len(l.connections) >= l.connectionLimit {
+		l.rejected++
+		return nil, false
+	}
+	if len(l.Sessions) >= l.sessionLimit {
+		drop := -1
+		for i, session := range l.Sessions {
+			if !session.Open {
+				drop = i
+				break
+			}
+		}
+		if drop < 0 {
+			l.rejected++
+			return nil, false
+		}
+		copy(l.Sessions[drop:], l.Sessions[drop+1:])
+		l.Sessions = l.Sessions[:len(l.Sessions)-1]
+	}
+	s := &Session{ID: fmt.Sprintf("%d", time.Now().UnixNano()), Remote: conn.RemoteAddr().String(),
+		ConnectedAt: time.Now(), Open: true}
 	l.Sessions = append(l.Sessions, s)
-	l.mu.Unlock()
+	l.connections[conn] = s
+	return s, true
 }
 
 // Snapshot 返回会话列表的拷贝（按连接时间倒序，最新的在前）。
@@ -119,8 +178,7 @@ func (m *Manager) Start(name string, port int) (*Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("绑定 :%d 失败: %w", port, err)
 	}
-	ctx, stop := context.WithCancel(context.Background())
-	l := &Listener{Name: name, Port: port, StartedAt: time.Now(), ln: ln, ctx: ctx, stop: stop}
+	l := newListener(name, port, ln, MaxSessionsPerListener, MaxConnectionsPerListener)
 	m.listeners[name] = l
 	go l.acceptLoop()
 	return l, nil
@@ -128,6 +186,7 @@ func (m *Manager) Start(name string, port int) (*Listener, error) {
 
 // acceptLoop 接受回连，每个连接一个读 goroutine。
 func (l *Listener) acceptLoop() {
+	defer close(l.acceptDone)
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
@@ -137,23 +196,26 @@ func (l *Listener) acceptLoop() {
 			_ = conn.Close()
 			return
 		}
-		go l.handleConn(conn)
+		session, accepted := l.registerSession(conn)
+		if !accepted {
+			_ = conn.Close()
+			continue
+		}
+		l.readers.Add(1)
+		go l.handleConn(conn, session)
 	}
 }
 
 // handleConn 捕获一个会话：远端地址、时间、有界预览。连接保持打开（回连的
 // shell/banner 通常保持连接），远端关闭或监听器停止时收尾。
-func (l *Listener) handleConn(conn net.Conn) {
-	s := &Session{
-		ID:          fmt.Sprintf("%d", time.Now().UnixNano()),
-		Remote:      conn.RemoteAddr().String(),
-		ConnectedAt: time.Now(),
-		Open:        true,
-	}
-	l.appendSession(s)
+func (l *Listener) handleConn(conn net.Conn, s *Session) {
 	defer func() {
+		l.mu.Lock()
 		s.Open = false
+		delete(l.connections, conn)
+		l.mu.Unlock()
 		_ = conn.Close()
+		l.readers.Done()
 	}()
 	buf := make([]byte, 4096)
 	var captured int
@@ -164,23 +226,19 @@ func (l *Listener) handleConn(conn net.Conn) {
 		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		n, err := conn.Read(buf)
 		if n > 0 {
+			l.mu.Lock()
 			s.LastActive = time.Now()
+			s.BytesIn += int64(n)
 			if captured < MaxCapturePerSession {
 				take := n
 				if captured+take > MaxCapturePerSession {
 					take = MaxCapturePerSession - captured
 				}
-				l.mu.Lock()
-				s.BytesIn += int64(n)
 				s.Preview += string(buf[:take])
 				// 丢弃非可打印垃圾的粗处理交给序列化端（JSON 会转义），这里不洗。
-				l.mu.Unlock()
 				captured += take
-			} else {
-				l.mu.Lock()
-				s.BytesIn += int64(n)
-				l.mu.Unlock()
 			}
+			l.mu.Unlock()
 		}
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -203,8 +261,18 @@ func (m *Manager) Stop(name string) ([]Session, error) {
 	m.mu.Unlock()
 	l.stop()
 	_ = l.ln.Close()
-	// 给读 goroutine 一点时间收尾标记 Open=false。
-	time.Sleep(200 * time.Millisecond)
+	// After accept exits, no reader can be added concurrently with Wait.
+	<-l.acceptDone
+	l.mu.Lock()
+	connections := make([]net.Conn, 0, len(l.connections))
+	for conn := range l.connections {
+		connections = append(connections, conn)
+	}
+	l.mu.Unlock()
+	for _, conn := range connections {
+		_ = conn.Close()
+	}
+	l.readers.Wait()
 	return l.Snapshot(), nil
 }
 
@@ -217,6 +285,16 @@ func (m *Manager) Get(name string) ([]Session, bool) {
 		return nil, false
 	}
 	return l.Snapshot(), true
+}
+
+func (m *Manager) Stats(name string) (Stats, bool) {
+	m.mu.Lock()
+	l, ok := m.listeners[name]
+	m.mu.Unlock()
+	if !ok {
+		return Stats{}, false
+	}
+	return l.Stats(), true
 }
 
 // List 返回全部运行中的监听器（按名字排序）。

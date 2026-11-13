@@ -894,12 +894,18 @@ type ExchangeMeta struct {
 	Path        string `json:"path"`
 }
 
+// Older indexes allow NULL metadata. Read it as unknown (zero/empty), without
+// changing stored history, exchange identity, or pretending it was a success.
+const exchangeMetaColumns = `id,COALESCE(ts,0),COALESCE(host,''),COALESCE(method,''),COALESCE(url_template,''),COALESCE(url,''),COALESCE(status,0),COALESCE(content_type,''),COALESCE(resp_len,0),COALESCE(path,'')`
+
+const archiveMetaColumns = `id,COALESCE(ts,0),COALESCE(host,''),COALESCE(method,''),COALESCE(url_template,''),COALESCE(url,''),COALESCE(status,0),COALESCE(content_type,''),COALESCE(req_len,0),COALESCE(resp_len,0),COALESCE(path,'')`
+
 // Search returns paged exchange metadata (never bodies).
 func (t *Traffic) Search(host string, page, size int) ([]ExchangeMeta, error) {
 	if size <= 0 || size > 500 {
 		size = 100
 	}
-	q := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges`
+	q := `SELECT ` + exchangeMetaColumns + ` FROM exchanges`
 	args := []any{}
 	if host != "" {
 		q += ` WHERE host=?`
@@ -1057,7 +1063,7 @@ func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total 
 	}
 	// id embeds capture timestamp + sequence, so a trailing id DESC makes the order
 	// total and pagination stable even when the sort column has many ties.
-	sel := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges` +
+	sel := `SELECT ` + exchangeMetaColumns + ` FROM exchanges` +
 		where + ` ORDER BY ` + col + ` ` + dir + `, id DESC LIMIT ? OFFSET ?`
 	qargs := append(append([]any{}, args...), size, page*size)
 	rs, err := t.db.Query(sel, qargs...)
@@ -1084,7 +1090,7 @@ func (t *Traffic) Get(id string) (req, resp string, err error) {
 	var reqBody, respBody []byte
 	var reqBlob, respBlob sql.NullString
 	var reqLen, respLen int
-	err = t.db.QueryRow(`SELECT b.req_head,b.req_body,b.req_blob,b.resp_head,b.resp_body,b.resp_blob,e.req_len,e.resp_len
+	err = t.db.QueryRow(`SELECT b.req_head,b.req_body,b.req_blob,b.resp_head,b.resp_body,b.resp_blob,COALESCE(e.req_len,0),COALESCE(e.resp_len,0)
 FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 		Scan(&reqHead, &reqBody, &reqBlob, &respHead, &respBody, &respBlob, &reqLen, &respLen)
 	if err == nil {
@@ -1095,7 +1101,7 @@ FROM exchange_bodies b JOIN exchanges e ON e.id=b.id WHERE b.id=?`, id).
 	}
 
 	var rel string
-	if err = t.db.QueryRow(`SELECT path FROM exchanges WHERE id=?`, id).Scan(&rel); err != nil {
+	if err = t.db.QueryRow(`SELECT COALESCE(path,'') FROM exchanges WHERE id=?`, id).Scan(&rel); err != nil {
 		return "", "", err
 	}
 	if strings.TrimSpace(rel) == "" {
@@ -1129,7 +1135,7 @@ type HostCount struct {
 // Hosts returns distinct recorded hosts with exchange counts, most recent
 // activity first — powers the page's target picker.
 func (t *Traffic) Hosts() ([]HostCount, error) {
-	rows, err := t.db.Query(`SELECT host, COUNT(*) AS n, MAX(ts) AS last FROM exchanges GROUP BY host ORDER BY last DESC`)
+	rows, err := t.db.Query(`SELECT COALESCE(host,''), COUNT(*) AS n, COALESCE(MAX(ts),0) AS last FROM exchanges GROUP BY COALESCE(host,'') ORDER BY last DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -1339,7 +1345,7 @@ func (t *Traffic) deleteWhere(tx *sql.Tx, where string, args ...any) (int64, err
 // already gone can still have an orphaned directory, and deleting the host should
 // take that with it.
 func (t *Traffic) hostTrees(where string, args ...any) ([]string, error) {
-	rows, err := t.db.Query(`SELECT DISTINCT host FROM exchanges WHERE `+where, args...)
+	rows, err := t.db.Query(`SELECT DISTINCT COALESCE(host,'') FROM exchanges WHERE `+where, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1349,6 +1355,9 @@ func (t *Traffic) hostTrees(where string, args ...any) ([]string, error) {
 		var h string
 		if err := rows.Scan(&h); err != nil {
 			return nil, err
+		}
+		if h == "" {
+			continue // Unknown hosts do not identify a legacy on-disk tree.
 		}
 		dirs = append(dirs, filepath.Join(t.dir, sanitize(h)))
 	}
@@ -2036,7 +2045,7 @@ func (t *Traffic) query(host, contains, bodyContains string, page, limit int) ([
 	if page < 0 {
 		page = 0
 	}
-	q := `SELECT id,ts,host,method,url_template,url,status,content_type,resp_len,path FROM exchanges WHERE 1=1`
+	q := `SELECT ` + exchangeMetaColumns + ` FROM exchanges WHERE 1=1`
 	args := []any{}
 	if host != "" {
 		hostName, port, err := normalizeSearchHost(host)

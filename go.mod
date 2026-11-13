@@ -64,7 +64,7 @@ require (
 )
 
 // norma 为本项目核心 agent 基建，原上游 github.com/Autumn-27/norma 曾发生仓库删除。
-// 将解析重定向到维护者 fork（内容 = 上游 v0.4.4，fork 内 module 声明保持原路径），彻底解耦单点依赖。
-replace github.com/Autumn-27/norma => github.com/chu0119/Norma v0.4.4
+// 固定 v0.4.4 的本地副本仅增加宿主身份、结果与参数兼容接口；来源摘要和许可在 third_party/norma。
+replace github.com/Autumn-27/norma => ./third_party/norma
 
 replace github.com/lqqyt2423/go-mitmproxy => ./third_party/go-mitmproxy

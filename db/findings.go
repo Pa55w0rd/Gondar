@@ -18,6 +18,7 @@ type DBFinding struct {
 	TrafficCount          int
 	EvidenceVersion       int64
 	ReportEvidenceVersion int64
+	ReportSource          *FindingReportSource
 	TrafficBindings       []FindingTrafficBinding // populated only for export
 
 	ID              int64
@@ -542,14 +543,16 @@ func (d *DB) ListFindingsForExport(f FindingFilter, ids []int64) ([]*DBFinding, 
 // and vuln-class filter — computed server-side so it stays exact regardless of
 // pagination.
 type FindingStats struct {
-	Total       int                 `json:"total"`
-	Pending     int                 `json:"pending"`
-	Critical    int                 `json:"critical"`
-	High        int                 `json:"high"`
-	Medium      int                 `json:"medium"`
-	Low         int                 `json:"low"`
-	VulnClasses []string            `json:"vulnclasses"`
-	Tasks       []FindingTaskOption `json:"tasks"` // 有漏洞的任务(供「按任务」下拉)
+	Filtered      *FindingCounts      `json:"filtered,omitempty"` // options remain global
+	ArchivedTotal int                 `json:"archived_total"`
+	Total         int                 `json:"total"`
+	Pending       int                 `json:"pending"`
+	Critical      int                 `json:"critical"`
+	High          int                 `json:"high"`
+	Medium        int                 `json:"medium"`
+	Low           int                 `json:"low"`
+	VulnClasses   []string            `json:"vulnclasses"`
+	Tasks         []FindingTaskOption `json:"tasks"` // 有漏洞的任务(供「按任务」下拉)
 }
 
 // FindingTaskOption is one entry in the 发现 page's 任务 filter: a task that has at
@@ -625,6 +628,7 @@ func (d *DB) FindingStats() (*FindingStats, error) {
 	}
 	for _, aggregate := range archived {
 		cold := aggregate.FindingStats
+		st.ArchivedTotal += cold.Total
 		st.Total += cold.Total
 		st.Pending += cold.Pending
 		st.Critical += cold.Critical
@@ -665,6 +669,10 @@ func (d *DB) GetFinding(id int64) (*DBFinding, error) {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(aidsJSON), &f.AssetIDs)
+	if f.Report!=""{
+		f.ReportSource, err = d.currentFindingReportSource(f)
+		if err != nil {return nil,err}
+	}
 	return f, nil
 }
 

@@ -444,12 +444,17 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 }
 
 // SetIntentState updates an intent node's state.
-// ResetRunningIntents returns any intent left in 'running' back to 'open' so it
-// is re-claimed. Called on startup: a 'running' intent with no live worker (a
-// backend restart or crashed worker goroutine left it stuck) would otherwise spin
-// forever in the UI. Workers resume from their transcript, so reopening is safe.
+// ResetRunningIntents recovers legacy transcripts, but isolates a registered
+// execution whose terminal receipt was never committed. Such a run may already
+// have affected the target; reopening it would silently replay an unknown action.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET
+state=CASE WHEN payload->'_execution'->>'phase' IN ('executing','unknown') THEN 'blocked' ELSE 'open' END,
+completed_at=CASE WHEN payload->'_execution'->>'phase' IN ('executing','unknown') THEN now() ELSE NULL END,
+blocked_reason=CASE WHEN payload->'_execution'->>'phase' IN ('executing','unknown') THEN 'execution_result_unknown: 进程中断前的执行结果未确认，请先核对已保存回执，勿原样重放' ELSE NULL END,
+payload=CASE WHEN payload->'_execution'->>'phase' IN ('executing','unknown')
+ THEN jsonb_set(payload,'{_execution,phase}','"unknown"'::jsonb) ELSE payload END,
+content_version=content_version+1
 WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 	if err != nil {
 		return 0, err
@@ -479,7 +484,9 @@ WHERE id=$1 AND exploration_id=$2 AND kind='intent'
 // number reopened. Workers resume from their transcripts; kept graph writes remain.
 func (s *ExplorationStore) ReopenBlockedIntents() (int64, error) {
 	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
-WHERE exploration_id=$1 AND kind='intent' AND state='blocked'`, s.expID)
+WHERE exploration_id=$1 AND kind='intent' AND state='blocked'
+AND COALESCE(payload->'_execution'->>'phase','')<>'unknown'
+AND COALESCE(blocked_reason,'') NOT LIKE 'execution_result_unknown:%'`, s.expID)
 	if err != nil {
 		return 0, err
 	}

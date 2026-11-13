@@ -116,7 +116,7 @@ func (d *DB) CreateDailySchedule(sourceID int64, clock, zone string, maxRuns, ti
 	if count >= 8 {
 		return nil, errors.New("每个源任务最多启用 8 个日历计划")
 	}
-	opts := TaskCreateOptions{Name: t.Name, CategoryID: t.CategoryID, TimeoutSeconds: timeout, PlanHeartbeatSeconds: t.PlanHeartbeatSeconds, CoverageEnabled: &t.CoverageEnabled, CompletionMode: t.CompletionMode}
+	opts := TaskCreateOptions{Name: t.Name, CategoryID: t.CategoryID, TimeoutSeconds: timeout, PlanHeartbeatSeconds: t.PlanHeartbeatSeconds, CoverageEnabled: &t.CoverageEnabled, CompletionMode: t.CompletionMode, AssetContextMode: t.AssetContextMode}
 	rows, err := tx.Query(`SELECT profile_id FROM task_llm_profiles WHERE task_id=$1 ORDER BY position`, sourceID)
 	if err != nil {
 		return nil, err

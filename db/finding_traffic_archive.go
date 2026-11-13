@@ -76,6 +76,7 @@ func normalizeArchivedFindingVersions(raw json.RawMessage) (json.RawMessage, err
 	}
 	for _, row := range rows {
 		normalizeArchivedFindingReportRecovery(row)
+		normalizeArchivedFindingReportSource(row)
 		for _, key := range []string{"evidence_version", "report_evidence_version", "artifact_evidence_version"} {
 			if row[key] == nil {
 				row[key] = 0

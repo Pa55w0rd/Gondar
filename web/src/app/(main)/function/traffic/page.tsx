@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+
 import Link from "next/link";
 
 import {
@@ -8,6 +9,7 @@ import {
   ArrowUpNarrowWideIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
+  CopyIcon,
   EraserIcon,
   FilterXIcon,
   ListChecksIcon,
@@ -46,7 +48,7 @@ import { api } from "@/lib/api";
 import { repeaterImportHref } from "@/lib/repeater-view";
 import { useStoredSortPreference } from "@/lib/sort-preference";
 import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
-import { cn } from "@/lib/utils";
+import { cn, copyText } from "@/lib/utils";
 
 function fmtTime(ts: string) {
   return new Date(ts).toLocaleString("zh-CN", {
@@ -78,6 +80,25 @@ function statusTone(status: number) {
 
 function MethodBadge({ method }: { method: string }) {
   return <Badge className="shrink-0 font-mono">{method}</Badge>;
+}
+
+function TrafficID({ id }: { id: string }) {
+  return (
+    <button
+      type="button"
+      className="inline-flex max-w-full items-start gap-1 text-muted-foreground hover:text-foreground"
+      title={`复制流量 ID：${id}`}
+      aria-label={`复制流量 ID ${id}`}
+      onClick={async (event) => {
+        event.stopPropagation();
+        if (await copyText(id)) toast.success("已复制流量 ID");
+        else toast.error("复制失败，请选择完整 ID 后手动复制");
+      }}
+    >
+      <span className="break-all text-left font-mono text-[10px]">{id}</span>
+      <CopyIcon className="mt-0.5 size-3 shrink-0" />
+    </button>
+  );
 }
 
 // Older captures may predate Host persistence because net/http keeps Host
@@ -366,11 +387,17 @@ export default function TrafficPage() {
       </div>
 
       {/* Toolbar */}
-      {traffic?.capture_stats && (traffic.capture_stats.dropped_pressure + traffic.capture_stats.failed + traffic.capture_stats.streamed_unrecorded > 0) && (
-        <div role="status" className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
-          本次服务启动后存在未完整录制的流量：背压跳过 {traffic.capture_stats.dropped_pressure} 条，写入失败 {traffic.capture_stats.failed} 条，流式转发未录制 {traffic.capture_stats.streamed_unrecorded} 条。目标转发继续运行；当前记录不能代表完整覆盖。
-        </div>
-      )}
+      {traffic?.capture_stats &&
+        traffic.capture_stats.dropped_pressure +
+          traffic.capture_stats.failed +
+          traffic.capture_stats.streamed_unrecorded >
+          0 && (
+          <div role="status" className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm">
+            本次服务启动后存在未完整录制的流量：背压跳过 {traffic.capture_stats.dropped_pressure} 条，写入失败{" "}
+            {traffic.capture_stats.failed} 条，流式转发未录制 {traffic.capture_stats.streamed_unrecorded}{" "}
+            条。目标转发继续运行；当前记录不能代表完整覆盖。
+          </div>
+        )}
       <div className="flex flex-wrap items-center gap-2">
         <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
           <PopoverTrigger asChild>
@@ -696,22 +723,33 @@ export default function TrafficPage() {
                         }
                       />
                     </TableCell>
-                    <TableCell className="hidden text-muted-foreground text-xs tabular-nums md:table-cell">{fmtTime(e.ts)}</TableCell>
+                    <TableCell className="hidden text-muted-foreground text-xs tabular-nums md:table-cell">
+                      {fmtTime(e.ts)}
+                    </TableCell>
                     <TableCell className="hidden font-mono text-xs md:table-cell">{e.host}</TableCell>
                     <TableCell>
                       <MethodBadge method={e.method} />
                     </TableCell>
                     <TableCell className="max-w-0">
-                      <span className="line-clamp-2 break-all font-mono text-xs md:line-clamp-1 md:truncate">{e.url}</span>
-                      <span className="mt-0.5 block text-muted-foreground text-[10px] md:hidden">{e.content_type || "—"} · {fmtBytes(e.resp_len)}</span>
+                      <span className="line-clamp-2 break-all font-mono text-xs md:line-clamp-1 md:truncate">
+                        {e.url}
+                      </span>
+                      <TrafficID id={e.id} />
+                      <span className="mt-0.5 block text-[10px] text-muted-foreground md:hidden">
+                        {e.content_type || "—"} · {fmtBytes(e.resp_len)}
+                      </span>
                     </TableCell>
                     <TableCell>
                       <span className={cn("font-mono font-semibold text-xs tabular-nums", statusTone(e.status))}>
                         {e.status}
                       </span>
                     </TableCell>
-                    <TableCell className="hidden text-muted-foreground text-xs md:table-cell">{e.content_type}</TableCell>
-                    <TableCell className="hidden text-right text-xs tabular-nums md:table-cell">{fmtBytes(e.resp_len)}</TableCell>
+                    <TableCell className="hidden text-muted-foreground text-xs md:table-cell">
+                      {e.content_type}
+                    </TableCell>
+                    <TableCell className="hidden text-right text-xs tabular-nums md:table-cell">
+                      {fmtBytes(e.resp_len)}
+                    </TableCell>
                   </TableRow>
                 ))}
                 {exchanges.length === 0 && (
@@ -748,6 +786,10 @@ export default function TrafficPage() {
                 </div>
                 <SheetTitle className="break-all font-mono">{selected.host}</SheetTitle>
                 <SheetDescription className="break-all font-mono">{selected.url}</SheetDescription>
+                <div>
+                  <span className="mr-2 text-xs">流量 ID</span>
+                  <TrafficID id={selected.id} />
+                </div>
                 {repeaterImportHref(selected.id, selected.url) && (
                   <Button variant="outline" size="sm" asChild className="w-fit">
                     <Link href={repeaterImportHref(selected.id, selected.url)!}>发到 Repeater</Link>

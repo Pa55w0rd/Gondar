@@ -43,6 +43,7 @@ import {
   XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { usePollSource } from "@/hooks/use-poll-source";
 
 import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
@@ -491,39 +492,26 @@ export default function TasksPage() {
   // re-render the whole page for nothing. Bail out when it matches.
   const lastRef = React.useRef<string>("");
 
-  const load = React.useCallback(() => {
-    api
-      .tasks()
-      .then((r) => {
-        const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
-        const sig = JSON.stringify(next);
-        if (sig === lastRef.current) return;
-        lastRef.current = sig;
-        setTasks(next);
-      })
-      .catch(() => {
-        // Polling is best-effort; the next interval retries automatically.
-      });
-  }, []);
+  const load = usePollSource(
+    () => api.tasks(),
+    (r) => {
+      const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
+      const sig = JSON.stringify(next);
+      if (sig === lastRef.current) return;
+      lastRef.current = sig;
+      setTasks(next);
+    },
+    POLL_MS,
+  );
 
-  const loadCategories = React.useCallback(() => {
-    api
-      .taskCategories()
-      .then((next) => {
-        setCategories(next);
-        setCategoriesLoaded(true);
-      })
-      .catch(() => {
-        // Category management remains retryable without blocking the task list.
-      });
-  }, []);
-
-  React.useEffect(() => {
-    load();
-    loadCategories();
-    const i = setInterval(load, POLL_MS);
-    return () => clearInterval(i);
-  }, [load, loadCategories]);
+  const loadCategories = usePollSource(
+    () => api.taskCategories(),
+    (next) => {
+      setCategories(next);
+      setCategoriesLoaded(true);
+    },
+    0,
+  );
 
   const refreshCategoriesAndTasks = React.useCallback(() => {
     lastRef.current = "";
@@ -3290,6 +3278,7 @@ function CreateTaskSheet({
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
   const [seedFirstIntent, setSeedFirstIntent] = React.useState(false); // 简短单步骤优先下发种子意图，复杂说明仍规划；默认关闭
   const [coverageEnabled, setCoverageEnabled] = React.useState(true); // 资产覆盖度功能;默认开。关闭=不计算/展示覆盖度、不累积范围、隐藏范围类工具(company 关联不受影响)
+  const [assetContextMode, setAssetContextMode] = React.useState<"declared_scope" | "task_sources">("declared_scope");
   const [interceptRules, setInterceptRules] = React.useState<AssetInterceptRuleInput[]>([]); // 任务级资产拦截规则(仅本任务生效,不进全局表)
   // 任务级目标登录凭据（v0.4.8）：worker 先登录再测；密码/TOTP 只进 DB，不回显。
   const [authCfg, setAuthCfg] = React.useState<TaskAuthConfigInput>({
@@ -3376,6 +3365,7 @@ function CreateTaskSheet({
         seedFirstIntent,
         planHeartbeatSeconds: heartbeatSec,
         coverageEnabled,
+        assetContextMode,
         interceptRules: interceptRules
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
@@ -3397,6 +3387,7 @@ function CreateTaskSheet({
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
       setCoverageEnabled(true);
+      setAssetContextMode("declared_scope");
       setAuthCfg({ enabled: false, login_url: "", method: "POST", content_type: "json", username: "", password: "" });
       setInterceptRules([]);
       setUploadCount(0);
@@ -3652,6 +3643,14 @@ function CreateTaskSheet({
 			  </NativeSelect>
 			  <FieldDescription>持续挖掘会保留已有成果并处理未验证方向；新增漏洞或交付清单不会直接结束任务。防空转、预算与故障保护仍生效，无进展时暂停或停止。</FieldDescription>
 			</Field>
+            <Field>
+              <FieldLabel htmlFor="asset-context-mode">资料来源</FieldLabel>
+              <NativeSelect id="asset-context-mode" value={assetContextMode} onChange={(event) => setAssetContextMode(event.target.value as "declared_scope" | "task_sources")}>
+                <NativeSelectOption value="declared_scope">授权范围内资料（兼容）</NativeSelectOption>
+                <NativeSelectOption value="task_sources">仅本任务与直接来源资料</NativeSelectOption>
+              </NativeSelect>
+              <FieldDescription>两种方式都保留任务范围约束。仅本任务模式会过滤无关联的共享资料，已有事实、报告和证据仍可查阅。</FieldDescription>
+            </Field>
             {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}
             <Collapsible>
               <CollapsibleTrigger className="group flex w-full items-center gap-2 border-t pt-4 font-medium text-sm">

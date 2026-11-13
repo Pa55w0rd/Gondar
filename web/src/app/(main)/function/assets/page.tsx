@@ -20,6 +20,7 @@ import { toast } from "sonner";
 
 import { AssetDslSearch } from "@/components/asset-dsl-search";
 import { ScopeTextEditor } from "@/components/scope-text-editor";
+import { TablePagination } from "@/components/table-pagination";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -60,7 +61,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import { parseCompanyScopeText } from "@/lib/company-scope";
-import type { Asset, Company, CompanyScopeRule } from "@/lib/types";
+import type { Asset, Company, CompanyName, CompanyScopeRule } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const METHOD_COLOR: Record<string, string> = {
@@ -111,6 +112,7 @@ export default function AssetsPage() {
   const [rows, setRows] = React.useState<Asset[]>([]);
   const [total, setTotal] = React.useState(0);
   const [companies, setCompanies] = React.useState<Company[]>([]);
+  const [companyNames, setCompanyNames] = React.useState<CompanyName[]>([]);
   const [counts, setCounts] = React.useState<Record<string, number>>({});
   const [tab, setTab] = React.useState("company");
   const [query, setQuery] = React.useState("");
@@ -121,6 +123,7 @@ export default function AssetsPage() {
   const [dslError, setDslError] = React.useState("");
   const [refreshKey, setRefreshKey] = React.useState(0);
   const assetsRequestRef = React.useRef(0);
+  const metaRequestRef = React.useRef(0);
   const [rowsTab, setRowsTab] = React.useState("");
 
   // asset selection & delete
@@ -134,17 +137,18 @@ export default function AssetsPage() {
   const [companyDeleteAssets, setCompanyDeleteAssets] = React.useState(false);
   const [companyDeleting, setCompanyDeleting] = React.useState(false);
 
-  // Companies + per-type counts (tab badges) — loaded on demand, no background polling.
+  // Name lookup and tab counts stay light; full scope is loaded for one page.
   const loadMeta = React.useCallback(() => {
+    const request = ++metaRequestRef.current;
     api
-      .companies()
-      .then(setCompanies)
+      .companyNames()
+      .then((value) => { if (metaRequestRef.current === request) setCompanyNames(value); })
       .catch(() => {
         /* Keep the last successful company snapshot on a transient failure. */
       });
     api
       .assetCounts()
-      .then(setCounts)
+      .then((value) => { if (metaRequestRef.current === request) setCounts(value); })
       .catch(() => {
         /* Keep the last successful counters on a transient failure. */
       });
@@ -225,6 +229,7 @@ export default function AssetsPage() {
 
   React.useEffect(() => {
     loadMeta();
+    return () => { metaRequestRef.current++; };
   }, [loadMeta]);
 
   // Reset query + page + selection when switching tabs
@@ -244,16 +249,25 @@ export default function AssetsPage() {
 
   const dslMode = query.trim() !== "";
 
-  // Server-side paginated page loader for the active data tab (company tab excluded).
+  // Every active tab uses server pagination. Company results contain full scope
+  // for each returned company, so editing never replaces it with a preview.
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit manual-reload trigger.
   React.useEffect(() => {
-    if (tab === "company") return;
     const request = ++assetsRequestRef.current;
     const dsl = query.trim();
     setLoading(true);
     const offset = page * size;
     const run = async () => {
       try {
+        if (tab === "company") {
+          const result = await api.companiesPage(page + 1, size, dsl);
+          if (assetsRequestRef.current !== request) return;
+          setCompanies(result.items);
+          setRowsTab(tab);
+          setTotal(result.total);
+          setDslError("");
+          return;
+        }
         const r = dsl ? await api.searchAssets(dsl, tab, size, offset) : await api.assets(tab, size, offset);
         if (assetsRequestRef.current !== request) return;
         setRows(r.assets);
@@ -263,6 +277,7 @@ export default function AssetsPage() {
       } catch (e) {
         if (assetsRequestRef.current !== request) return;
         setDslError(String((e as Error)?.message ?? e));
+        if (tab === "company") setCompanies([]);
         setRows([]);
         setRowsTab(tab);
         setTotal(0);
@@ -281,20 +296,20 @@ export default function AssetsPage() {
   }, [tab, page, size, query, refreshKey]);
 
   React.useEffect(() => {
-    if (tab === "company") return;
+    if (rowsTab !== tab) return;
     const lastPage = Math.max(0, Math.ceil(total / size) - 1);
     if (page > lastPage) setPage(lastPage);
-  }, [page, size, tab, total]);
+  }, [page, size, tab, rowsTab, total]);
 
   const companyById = React.useMemo(() => {
     const m = new Map<number, string>();
-    for (const c of companies) m.set(c.id, c.name);
+    for (const c of companyNames) m.set(c.id, c.name);
     return m;
-  }, [companies]);
+  }, [companyNames]);
 
   const companyName = (id?: number) => (id ? (companyById.get(id) ?? "") : "");
 
-  const tabCounts: Record<string, number> = { ...counts, company: companies.length };
+  const tabCounts: Record<string, number> = { ...counts, company: companyNames.length };
   const totalAssets = Object.values(counts).reduce((a, b) => a + b, 0);
 
   // rows are already the current server-side page.
@@ -348,7 +363,9 @@ export default function AssetsPage() {
         </div>
 
         {/* 企业 */}
-        <TabsContent value="company" className="mt-0 flex min-h-0 flex-1 flex-col">
+        <TabsContent value="company" className="mt-0 flex min-h-0 flex-1 flex-col gap-2">
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="按企业名称搜索" aria-label="按企业名称搜索" />
+          {dslError && <p className="text-destructive text-sm">{dslError}</p>}
           <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
             <div className="min-h-0 flex-1 overflow-auto">
               <Table>
@@ -373,11 +390,12 @@ export default function AssetsPage() {
                       <TableCell>
                         {c.scope?.length ? (
                           <div className="flex flex-wrap gap-1">
-                            {c.scope.map((s, i) => (
+                            {c.scope.slice(0, 3).map((s, i) => (
                               <Badge key={i} variant="secondary" className="font-mono text-[11px]">
                                 {s.raw}
                               </Badge>
                             ))}
+                            {c.scope.length > 3 && <span className="text-muted-foreground text-xs">共 {c.scope.length} 条</span>}
                           </div>
                         ) : (
                           <span className="text-muted-foreground text-xs">未设置范围</span>
@@ -406,13 +424,14 @@ export default function AssetsPage() {
                   {companies.length === 0 && (
                     <TableRow>
                       <TableCell colSpan={4} className="py-10 text-center text-muted-foreground text-sm">
-                        还没有企业。点击右上角「新增企业」并填写资产范围，系统会自动认领命中的资产。
+                        {!loaded ? "加载中…" : query.trim() ? "没有匹配的企业。" : "还没有企业。点击右上角「新增企业」并填写资产范围，系统会自动认领命中的资产。"}
                       </TableCell>
                     </TableRow>
                   )}
                 </TableBody>
               </Table>
             </div>
+            <TablePagination page={page + 1} pageSize={size} total={total} onPageChange={(value) => setPage(value - 1)} onPageSizeChange={setSize} pageSizeOptions={[10, 20, 50, 100, 200]} />
           </Card>
         </TabsContent>
 

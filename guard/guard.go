@@ -15,16 +15,19 @@ import (
 	"time"
 
 	"github.com/Autumn-27/norma/hook"
+	"github.com/Autumn-27/norma/toolcall"
 	"gondar/intercept"
 )
 
 // AuditEntry records one gated tool call.
 type AuditEntry struct {
-	TS      int64  `json:"ts"`
-	Tool    string `json:"tool"`
-	Action  string `json:"action"` // allow|block
-	Reason  string `json:"reason,omitempty"`
-	Command string `json:"command,omitempty"`
+	TS           int64  `json:"ts"`
+	Tool         string `json:"tool"`
+	Action       string `json:"action"` // allow|block
+	Reason       string `json:"reason,omitempty"`
+	Command      string `json:"command,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+	InvocationID string `json:"invocation_id,omitempty"`
 }
 
 // Guard enforces the side-effect policy via agent-core hooks.
@@ -90,8 +93,13 @@ func (g *Guard) preToolUse(ctx context.Context, ev hook.Event) hook.Result {
 		_ = json.Unmarshal(ev.Input, &in)
 		cmd = in.Text
 	}
-	g.record(ev.ToolName, "allow", "", cmd)
-	return g.applyIntercept(ctx, ev)
+	result := g.applyIntercept(ctx, ev)
+	if result.Decision == "block" {
+		g.recordCall(ctx, ev.ToolName, "block", result.Message, cmd)
+	} else {
+		g.recordCall(ctx, ev.ToolName, "allow", "", cmd)
+	}
+	return result
 }
 
 // applyIntercept evaluates user-configured intercept rules against the tool call.
@@ -139,6 +147,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	}
 	switch dec.Action {
 	case "deny":
+		toolcall.Mark(ctx, toolcall.PolicyDenied, toolcall.NotExecuted, "policy", "policy_denied", dec.RuleID)
 		// 观测:deny 命中不阻塞审批,直接记一条 denied（历史/任务拦截页可见）。
 		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
 		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
@@ -151,10 +160,12 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		// immediately without creating a pending record — avoids orphaned DB entries
 		// and makes execOne complete fast, reducing the race against drainSynthetic.
 		if ctx.Err() != nil {
+			toolcall.Mark(ctx, toolcall.Cancelled, toolcall.NotExecuted, "policy", "cancelled_before_approval", dec.RuleID)
 			return g.block(ev.ToolName, systemBlockMessage("工作已取消，平台安全管控阻止执行"), "")
 		}
 		convID := intercept.ConvIDFromContext(ctx)
 		if !g.interceptor.HandleAsk(ctx, convID, dec, ev.ToolName, ev.Input) {
+			toolcall.MarkDefault(ctx, toolcall.ApprovalRejected, toolcall.NotExecuted, "policy", "approval_rejected")
 			return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
 		}
 		return hook.Result{}
@@ -181,9 +192,9 @@ func systemBlockMessage(reason string) string {
 
 var reBlocked = regexp.MustCompile(`(?i)\b(403|forbidden|waf|blocked|rate.?limit|429|captcha|denied)\b`)
 
-// postToolUse is the Observer failure-attribution hook (G5): it classifies tool
-// results into blocked / error / ok so the planner can change strategy instead
-// of giving up at a WAF.
+// postToolUse provides bounded textual hints about target responses. These
+// legacy blocked/error counters are not trusted execution/policy outcomes and
+// cannot exempt an error from the independent runtime failure protections.
 func (g *Guard) postToolUse(_ context.Context, ev hook.Event) hook.Result {
 	if ev.ToolName != "Bash" {
 		return hook.Result{}
@@ -252,16 +263,19 @@ func (g *Guard) AttributionStats() map[string]any {
 }
 
 func (g *Guard) block(tool, reason, cmd string) hook.Result {
-	g.record(tool, "block", reason, cmd)
 	return hook.Result{Decision: "block", Message: reason}
 }
 
-func (g *Guard) record(tool, action, reason, cmd string) {
+func (g *Guard) recordCall(ctx context.Context, tool, action, reason, cmd string) {
+	var runID, invocationID string
+	if id, ok := toolcall.IdentityFrom(ctx); ok {
+		runID, invocationID = id.RunID, id.InvocationID
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.audit = append(g.audit, AuditEntry{TS: time.Now().Unix(), Tool: tool, Action: action, Reason: reason, Command: cmd})
+	g.audit = append(g.audit, AuditEntry{TS: time.Now().Unix(), Tool: tool, Action: action, Reason: reason, Command: cmd, RunID: runID, InvocationID: invocationID})
 	if len(g.audit) > 2000 {
-		g.audit = g.audit[len(g.audit)-2000:]
+		g.audit = append([]AuditEntry(nil), g.audit[len(g.audit)-2000:]...)
 	}
 }
 

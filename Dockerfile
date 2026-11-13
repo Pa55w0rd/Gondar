@@ -77,6 +77,7 @@ COPY skills/ /app/skills/
 COPY LICENSE NOTICE.md /app/
 COPY third_party/go-mitmproxy/LICENSE /app/third_party/go-mitmproxy/LICENSE
 COPY third_party/shadcn-tailwind/LICENSE /app/third_party/shadcn-tailwind/LICENSE
+COPY third_party/norma/LICENSE third_party/norma/GONDAR_NOTICE.md third_party/norma/UPSTREAM_FILES.json /app/third_party/norma/
 # data/（SQLite + jwt.key）持久化点
 VOLUME ["/app/data", "/opt/gondar-tools"]
 EXPOSE 8787 8788

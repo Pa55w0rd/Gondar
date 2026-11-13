@@ -251,7 +251,9 @@ export default function FindingsPage() {
   // 导出弹窗状态:范围(当前筛选/全部/选中) × 格式(md 单文件/md 分文件 zip/csv/json)。
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportScope, setExportScope] = React.useState<"filtered" | "all" | "selected">("filtered");
-  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "docx-zip" | "csv" | "json">("md-single");
+  const [exportFormat, setExportFormat] = React.useState<"md-single" | "md-zip" | "docx-zip" | "csv" | "json">(
+    "md-single",
+  );
   const [exporting, setExporting] = React.useState(false);
 
   const toggleSelected = React.useCallback((id: string, checked: boolean) => {
@@ -313,6 +315,29 @@ export default function FindingsPage() {
 
   // 资产视图右侧列表 = 平铺列表 + 选中子树的筛选,所以两个视图共用一份列表状态。
   const activeAssetScope = view === "asset" ? assetScope : null;
+  const statsFilter = JSON.stringify([severity, status, vulnclass, task, query, activeAssetScope]);
+  const currentStatsFilter = React.useRef(statsFilter);
+  const statsRequest = React.useRef(0);
+  currentStatsFilter.current = statsFilter;
+  const loadStats = React.useCallback(async () => {
+    if (currentStatsFilter.current !== statsFilter) return;
+    const request = ++statsRequest.current;
+    try {
+      const result = await api.findingStats({
+        severity,
+        status,
+        vulnclass,
+        task,
+        query,
+        assetScope: activeAssetScope ?? undefined,
+      });
+      if (request !== statsRequest.current || currentStatsFilter.current !== statsFilter) return;
+      setStats(result);
+      setStatsLoaded(true);
+    } catch {
+      // Keep the last successful snapshot on a temporary polling failure.
+    }
+  }, [activeAssetScope, query, severity, statsFilter, status, task, vulnclass]);
 
   // loadFlat 拉取平铺视图的当前页;task 筛选交给后端,与分组视图共用同一批筛选条件。
   const loadFlat = React.useCallback(async () => {
@@ -562,30 +587,24 @@ export default function FindingsPage() {
     if (flatPage > lastPage) setFlatPage(lastPage);
   }, [flat.loaded, flat.total, flatPage, flatPageSize]);
 
-  // Whole-table aggregates (stat cards + vuln-class options) — independent of the
-  // current page, so they stay exact.
+  // Cards follow the list filters, while options and the labelled global total
+  // keep their whole-library meaning. Pagination never narrows either count.
   React.useEffect(() => {
-    let alive = true;
-    const load = () => {
-      api
-        .findingStats()
-        .then((s) => {
-          if (alive) {
-            setStats(s);
-            setStatsLoaded(true);
-          }
-        })
-        .catch(() => {
-          // Keep the previous aggregate snapshot until the next poll.
-        });
+    if (!preferencesHydrated) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    setStatsLoaded(false);
+    const refresh = async () => {
+      await loadStats();
+      if (!disposed) timer = setTimeout(() => void refresh(), 5000);
     };
-    load();
-    const t = setInterval(load, 5000);
+    void refresh();
     return () => {
-      alive = false;
-      clearInterval(t);
+      disposed = true;
+      ++statsRequest.current;
+      clearTimeout(timer);
     };
-  }, []);
+  }, [loadStats, preferencesHydrated]);
 
   React.useEffect(() => {
     if (!statsLoaded) return;
@@ -609,12 +628,7 @@ export default function FindingsPage() {
         await api.setFindingStatus(f.finding_id, next);
         toast.success(`已标记为「${statusMeta("finding", next).label}」`);
         // refresh stat cards (pending count) and drop the row if it no longer matches the status filter
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The row update remains valid even if the aggregate refresh fails.
-          });
+        void loadStats();
         if (status !== "all" && next !== status) {
           setFindings((cur) => cur.filter((x) => !isSameFinding(x, f)));
           setTotal((t) => Math.max(0, t - 1));
@@ -626,7 +640,7 @@ export default function FindingsPage() {
         toast.error(`更新失败：${(e as Error).message}`);
       }
     },
-    [refreshAfterMutation, setFindings, status],
+    [loadStats, refreshAfterMutation, setFindings, status],
   );
 
   // 行内展开的详细报告缓存按全局稳定行键存。report 是大段 Markdown,列表查询不带它,
@@ -654,7 +668,9 @@ export default function FindingsPage() {
       setReports((r) => ({ ...r, [key]: { status: "loading", text: "" } }));
       api
         .getFinding(fid)
-        .then((full) => setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "" } })))
+        .then((full) =>
+          setReports((r) => ({ ...r, [key]: { status: "done", text: full.report ?? "", source: full.report_source } })),
+        )
         .catch(() => setReports((r) => ({ ...r, [key]: { status: "error", text: "" } })));
     },
     [expanded, reports],
@@ -679,12 +695,7 @@ export default function FindingsPage() {
           ),
         );
         toast.success("已保存");
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The edit remains valid even if the aggregate refresh fails.
-          });
+        void loadStats();
         refreshAfterMutation(f);
       } catch (e) {
         toast.error(`保存失败：${(e as Error).message}`);
@@ -692,7 +703,7 @@ export default function FindingsPage() {
         setSaving(false);
       }
     },
-    [edit, refreshAfterMutation, setFindings],
+    [edit, loadStats, refreshAfterMutation, setFindings],
   );
 
   // deleteFinding 删除一个漏洞(需二次确认):删成功后从列表移除、收起行、刷新统计。
@@ -712,18 +723,13 @@ export default function FindingsPage() {
         const rowKey = findingRowKey(f);
         setExpanded((cur) => (cur === rowKey ? null : cur));
         toast.success("已删除漏洞");
-        api
-          .findingStats()
-          .then(setStats)
-          .catch(() => {
-            // The deletion remains valid even if the aggregate refresh fails.
-          });
+        void loadStats();
         refreshAfterMutation(f, true);
       } catch (e) {
         toast.error(`删除失败：${(e as Error).message}`);
       }
     },
-    [refreshAfterMutation, setFindings],
+    [loadStats, refreshAfterMutation, setFindings],
   );
 
   const openDeepen = React.useCallback((f: Finding) => {
@@ -751,13 +757,14 @@ export default function FindingsPage() {
     }
   }
 
+  const counts = stats.filtered ?? stats;
   const statCards = [
-    { label: "发现总数", value: stats.total, icon: BugIcon },
-    { label: "待处理", value: stats.pending, tone: "text-amber-500", icon: ClockIcon },
-    { label: "严重", value: stats.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
-    { label: "高危", value: stats.high, tone: "text-red-500", icon: TriangleAlertIcon },
-    { label: "中危", value: stats.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
-    { label: "低危", value: stats.low, tone: "text-slate-500", icon: InfoIcon },
+    { label: "发现总数", value: counts.total, icon: BugIcon },
+    { label: "待处理", value: counts.pending, tone: "text-amber-500", icon: ClockIcon },
+    { label: "严重", value: counts.critical, tone: "text-rose-600", icon: ShieldAlertIcon },
+    { label: "高危", value: counts.high, tone: "text-red-500", icon: TriangleAlertIcon },
+    { label: "中危", value: counts.medium, tone: "text-amber-500", icon: TriangleAlertIcon },
+    { label: "低危", value: counts.low, tone: "text-slate-500", icon: InfoIcon },
   ];
 
   // 导出弹窗里「当前筛选」的条数:两个视图的筛选一致,只是统计口径来源不同。
@@ -830,6 +837,10 @@ export default function FindingsPage() {
         </Tabs>
       </div>
       <div className="flex flex-1 flex-col gap-4 md:gap-6">
+        <p className="text-muted-foreground text-xs">
+          当前筛选统计 · 全库 {stats.total} 条（含归档 {stats.archived_total ?? 0}{" "}
+          条）；当前列表与筛选统计仅包含可查询的发现。
+        </p>
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           {statCards.map((stat) => {
             const StatIcon = stat.icon;
@@ -839,7 +850,7 @@ export default function FindingsPage() {
                   <CardDescription>{stat.label}</CardDescription>
                   <CardTitle className={cn("flex items-center gap-2 text-2xl tabular-nums", stat.tone)}>
                     <StatIcon className="size-5" aria-hidden="true" />
-                    {stat.value}
+                    {statsLoaded ? stat.value : "—"}
                   </CardTitle>
                 </CardHeader>
               </Card>

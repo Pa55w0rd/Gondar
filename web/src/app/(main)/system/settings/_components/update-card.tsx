@@ -18,6 +18,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import { api, sseUrl } from "@/lib/api";
 import type { UpdateCheck, UpdateProgress } from "@/lib/types";
+import { abortableUpdateDelay, type ExpectedUpdate, UpdateHTTPError, waitForUpdate } from "@/lib/update-confirmation";
 
 /** 等待新版本上线的最长时间。一次升级要经过三次进程启动（暂存 → 换装 → 新版），
  *  每次都是秒级，三分钟足够覆盖慢磁盘和 Docker 容器重建。 */
@@ -35,23 +36,50 @@ function humanSize(n?: number): string {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
 export function UpdateCard() {
   const [info, setInfo] = React.useState<UpdateCheck | null>(null);
   const [checking, setChecking] = React.useState(true);
   const [progress, setProgress] = React.useState<UpdateProgress | null>(null);
-  // 与 progress 分开：暂存完成后进程就没了，SSE 会断，此时要切到轮询 /api/health。
+  // SSE仅用于展示，独立确认跨进程核对本次操作和实际运行身份。
   const [restarting, setRestarting] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
 
-  // quiet 同时决定要不要绕过后端缓存：进页面时的自动检查用缓存（顶栏刚查过），
-  // 用户手动点「检查更新」则强制回源，否则刚发布的版本要等缓存过期才看得到。
+  const [pending, setPending] = React.useState<ExpectedUpdate | null>(null);
+  const [confirmationNote, setConfirmationNote] = React.useState("");
+  const mounted = React.useRef(false);
+  const observer = React.useRef<AbortController | null>(null);
+  const stream = React.useRef<EventSource | null>(null);
+  const pendingRef = React.useRef<ExpectedUpdate | null>(null);
+
+  const remember = React.useCallback((value: ExpectedUpdate | null) => {
+    pendingRef.current = value;
+    if (mounted.current) setPending(value);
+    try {
+      if (value) sessionStorage.setItem("gondar_update_confirmation", JSON.stringify(value));
+      else sessionStorage.removeItem("gondar_update_confirmation");
+    } catch {
+      /* observation remains valid when storage is unavailable */
+    }
+  }, []);
+
+  const current = React.useCallback(
+    (controller: AbortController) => mounted.current && observer.current === controller && !controller.signal.aborted,
+    [],
+  );
+  const beginObserver = React.useCallback(() => {
+    observer.current?.abort();
+    stream.current?.close();
+    const controller = new AbortController();
+    observer.current = controller;
+    return controller;
+  }, []);
+
   const check = React.useCallback((quiet = false) => {
     setChecking(true);
     api
       .checkUpdate(!quiet)
       .then((r) => {
+        if (!mounted.current) return;
         setInfo(r);
         if (!quiet) {
           if (r.error) toast.error(`检查更新失败：${r.error}`);
@@ -60,121 +88,184 @@ export function UpdateCard() {
         }
       })
       .catch((e) => {
-        if (!quiet) toast.error(`检查更新失败：${(e as Error).message}`);
+        if (mounted.current && !quiet) toast.error(`检查更新失败：${(e as Error).message}`);
       })
-      .finally(() => setChecking(false));
+      .finally(() => {
+        if (mounted.current) setChecking(false);
+      });
   }, []);
 
-  React.useEffect(() => {
-    check(true);
-  }, [check]);
-
-  // 轮询 /api/version（鉴权）直到版本号变化。
-  //
-  // 判据必须是"版本变了"而不是"能连上了"：换装过程中旧版本会短暂地重新起来一次
-  // （那一次只负责把 gondar.new 换上去然后立刻退出），只看连通性会误判成功。
-  const waitForNewVersion = React.useCallback(async (fromVersion: string) => {
-    setRestarting(true);
-    const deadline = Date.now() + RESTART_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await sleep(2000);
-      try {
-        // /api/health 已去身份（公网指纹治理）：版本查询走鉴权的 /api/version。
-        const r = await fetch("/api/version", { cache: "no-store" });
-        if (r.ok) {
-          const j = (await r.json()) as { version?: string };
-          if (j.version && j.version !== fromVersion) {
-            toast.success(`已更新到 ${j.version}，正在重新加载页面`);
-            await sleep(800);
-            window.location.reload();
-            return;
-          }
-        }
-      } catch {
-        // 重启窗口内连不上是预期的，继续轮询。
-      }
-    }
-    setRestarting(false);
-    toast.error("等待服务重启超时。请检查后端日志，或确认 gondar 是通过 start.sh / start.bat 启动的。");
-  }, []);
-
-  // 订阅更新进度。SSE 不走 Next 的 /api 重写（那层会缓冲，事件推不出来）。
+  // Progress frames never decide success. They may be dropped during restart.
   const openStream = React.useCallback(
-    (fromVersion: string) => {
+    (expected: ExpectedUpdate, controller: AbortController) => {
       const es = new EventSource(sseUrl("/api/update/stream"));
-      es.onmessage = (ev) => {
-        let p: UpdateProgress;
+      stream.current = es;
+      es.onmessage = (event) => {
+        if (!current(controller)) return;
+        let value: UpdateProgress;
         try {
-          p = JSON.parse(ev.data) as UpdateProgress;
+          value = JSON.parse(event.data) as UpdateProgress;
         } catch {
           return;
         }
-        setProgress(p);
-        if (p.phase === "failed") {
-          es.close();
-          setBusy(false);
-          toast.error(`更新失败：${p.error || p.message}`);
-          return;
-        }
-        if (p.phase === "staged") {
-          es.close();
-          void waitForNewVersion(fromVersion);
-        }
+        if (value.request_id !== expected.request_id) return;
+        if (pendingRef.current?.operation_id && value.operation_id !== pendingRef.current.operation_id) return;
+        setProgress(value);
+        if (value.phase === "staged") setRestarting(true);
       };
-      es.onerror = () => {
-        // 进程退出时 SSE 必然断开。如果已经进入等待重启，这属于正常现象，
-        // 交给 /api/health 轮询继续判定即可。
-        es.close();
-      };
-      return es;
+      es.onerror = () => es.close();
     },
-    [waitForNewVersion],
+    [current],
   );
 
-  const doUpdate = () => {
-    if (!info) return;
-    const from = info.current;
-    const ok = window.confirm(
-      `确定更新到 ${info.latest}？\n\n` +
-        "更新会重启程序，正在运行的任务会被中断。\n" +
-        (info.mode === "docker"
-          ? "\n注意：容器内更新只替换程序本身，不会更新镜像里的 playwright / nmap 等工具链；" +
-            "若新版本依赖新工具，请改用 docker compose pull。"
-          : ""),
-    );
-    if (!ok) return;
-
-    setBusy(true);
-    setProgress({ phase: "downloading", percent: 0, message: "准备中…" });
-    const es = openStream(from);
-    api.applyUpdate().catch((e) => {
-      es.close();
+  const observe = React.useCallback(
+    async (expected: ExpectedUpdate, existing?: AbortController) => {
+      const controller = existing ?? beginObserver();
+      if (!existing) openStream(expected, controller);
+      remember(expected);
+      setBusy(true);
+      setConfirmationNote("");
+      const result = await waitForUpdate(expected, controller.signal, api.updateStatus, {
+        timeoutMs: RESTART_TIMEOUT_MS,
+        legacyVersion: api.updateRuntimeVersion,
+        onStatus: (status) => {
+          if (!current(controller)) return;
+          if (status.progress?.operation_id === status.operation.operation_id)
+            setProgress(status.progress as UpdateProgress);
+          if (["staged", "activating", "settling"].includes(status.operation.phase)) setRestarting(true);
+        },
+      });
+      if (!current(controller)) return;
+      stream.current?.close();
       setBusy(false);
-      setProgress(null);
-      toast.error(`启动更新失败：${(e as Error).message}`);
-    });
-  };
+      setRestarting(false);
+      if (result.kind === "confirmed") {
+        setBusy(true);
+        remember(null);
+        toast.success(`已确认更新到 ${result.version}，正在重新加载页面`);
+        await abortableUpdateDelay(800, controller.signal);
+        if (current(controller)) window.location.reload();
+      } else if (result.kind === "failed" || result.kind === "rolled_back") {
+        remember(null);
+        setConfirmationNote(result.message);
+        toast.error(
+          result.kind === "rolled_back" ? `更新已自动回滚：${result.message}` : `更新失败：${result.message}`,
+        );
+      } else if (result.kind === "auth") {
+        setConfirmationNote("登录已过期，请重新登录后继续确认本次更新；后台安装不会因此取消。");
+        toast.error("需要重新登录才能确认更新结果");
+      } else if (result.kind === "legacy") {
+        remember(null);
+        setConfirmationNote(
+          "目标版本已出现，但服务未提供本次操作的完整身份回执。请手动刷新并核对版本，当前未标记为已确认成功。",
+        );
+        check(true);
+      } else if (result.kind === "timeout") {
+        setConfirmationNote("尚未确认本次更新。后台可能仍在下载或重启，可继续确认；不会重复发起安装。");
+      }
+    },
+    [beginObserver, check, current, openStream, remember],
+  );
 
-  const doRollback = () => {
-    if (!info) return;
+  React.useEffect(() => {
+    mounted.current = true;
+    check(true);
+    try {
+      const value = JSON.parse(sessionStorage.getItem("gondar_update_confirmation") || "null") as ExpectedUpdate | null;
+      if (
+        value &&
+        typeof value.request_id === "string" &&
+        typeof value.target_version === "string" &&
+        typeof value.repository === "string"
+      )
+        void observe(value);
+    } catch {
+      /* no saved observation */
+    }
+    return () => {
+      mounted.current = false;
+      observer.current?.abort();
+      stream.current?.close();
+    };
+  }, [check, observe]);
+
+  const doUpdate = async () => {
+    if (pendingRef.current) {
+      void observe(pendingRef.current);
+      return;
+    }
+    if (!info?.latest) return;
     if (
       !window.confirm(
-        "回滚到上一版本？\n\n程序会重启，正在运行的任务会被中断。\n注意：数据库结构不会回退，旧版本可能无法识别新版写入的数据。",
+        `确定更新到 ${info.latest}？\n\n更新会重启程序，正在运行的任务会被中断。` +
+          (info.mode === "docker" ? "\n容器内更新保留原工具层；重建镜像请使用 docker compose pull。" : ""),
       )
     )
       return;
-    const from = info.current;
+    const requestID =
+      typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("");
+    const expected: ExpectedUpdate = { request_id: requestID, target_version: info.latest, repository: info.repo };
+    const controller = beginObserver();
+    remember(expected);
     setBusy(true);
-    api
-      .rollbackUpdate()
-      .then(() => {
-        toast.success("已切换到上一版本，正在重启…");
-        void waitForNewVersion(from);
-      })
-      .catch((e) => {
+    setProgress({ phase: "downloading", percent: 0, message: "正在提交更新…" });
+    openStream(expected, controller);
+    try {
+      const accepted = await api.applyUpdate({ request_id: requestID, target_version: info.latest }, controller.signal);
+      if (!current(controller)) return;
+      if (accepted.operation_id) expected.operation_id = accepted.operation_id;
+      void observe({ ...expected }, controller);
+    } catch (error) {
+      if (!current(controller)) return;
+      if (error instanceof UpdateHTTPError && error.status >= 400 && error.status < 500) {
+        stream.current?.close();
+        remember(null);
         setBusy(false);
-        toast.error(`回滚失败：${(e as Error).message}`);
-      });
+        setProgress(null);
+        toast.error(`启动更新失败：${error.message}`);
+      } else {
+        // The acknowledgement may be lost after acceptance. Reconcile by request
+        // ID instead of issuing another POST or waiting for a staged SSE frame.
+        void observe(expected, controller);
+      }
+    }
+  };
+
+  const doRollback = async () => {
+    if (!info || !window.confirm("回滚到上一版本？\n\n程序会重启；数据库结构不会回退。")) return;
+    const from = info.current;
+    const controller = beginObserver();
+    setBusy(true);
+    try {
+      await api.rollbackUpdate();
+      if (!current(controller)) return;
+      remember(null);
+      setRestarting(true);
+      const deadline = Date.now() + RESTART_TIMEOUT_MS;
+      while (current(controller) && Date.now() < deadline) {
+        await abortableUpdateDelay(2000, controller.signal);
+        try {
+          const version = await api.updateRuntimeVersion(controller.signal);
+          if (current(controller) && version.version !== from) {
+            toast.success(`回滚后版本为 ${version.version}，正在重新加载`);
+            window.location.reload();
+            return;
+          }
+        } catch (error) {
+          if (error instanceof UpdateHTTPError && error.status === 401) throw new Error("请重新登录后核对回滚结果");
+        }
+      }
+      if (current(controller)) toast.error("尚未确认回滚后的版本，请检查后端日志");
+    } catch (error) {
+      if (current(controller)) toast.error(`回滚未确认：${(error as Error).message}`);
+    } finally {
+      if (current(controller)) {
+        setBusy(false);
+        setRestarting(false);
+      }
+    }
   };
 
   const phase = progress?.phase;
@@ -195,6 +286,16 @@ export function UpdateCard() {
         <CardDescription>从 GitHub 检查并安装新版本。更新会重启程序，正在运行的任务会被中断。</CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
+        {confirmationNote && (
+          <p role="status" className="text-amber-700 text-sm dark:text-amber-400">
+            {confirmationNote}
+          </p>
+        )}
+        {pending && !busy && !restarting && (
+          <Button variant="outline" size="sm" onClick={() => void observe(pending)}>
+            继续确认本次更新
+          </Button>
+        )}
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="text-muted-foreground">当前版本</span>
           <Badge variant="secondary" className="font-mono">

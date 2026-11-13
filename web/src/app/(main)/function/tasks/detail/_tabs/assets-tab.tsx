@@ -351,11 +351,41 @@ export function AssetsTab({ taskId }: { taskId: string }) {
   const [loading, setLoading] = React.useState(false);
   const [dslError, setDslError] = React.useState("");
   const [refreshKey, setRefreshKey] = React.useState(0);
+  const [contextMode, setContextMode] = React.useState<"declared_scope" | "task_sources">("declared_scope");
+  const [contextLoaded, setContextLoaded] = React.useState(false);
+  const [contextSaving, setContextSaving] = React.useState(false);
   const [addOpen, setAddOpen] = React.useState(false);
   const [removeTarget, setRemoveTarget] = React.useState<Asset | null>(null);
   const [removing, setRemoving] = React.useState(false);
   const assetsRequestRef = React.useRef(0);
   const dslMode = query.trim() !== "";
+
+  React.useEffect(() => {
+    let active = true;
+    setContextLoaded(false);
+    api.task(taskId).then((task) => {
+      if (!active) return;
+      setContextMode(task.asset_context_mode ?? "declared_scope");
+      setContextLoaded(true);
+    }).catch(() => { /* Keep the selector disabled until its state is known. */ });
+    return () => { active = false; };
+  }, [taskId]);
+
+  const changeContextMode = async (mode: "declared_scope" | "task_sources") => {
+    if (mode === contextMode || contextSaving) return;
+    setContextSaving(true);
+    try {
+      const task = await api.updateTask(taskId, { asset_context_mode: mode });
+      setContextMode(task.asset_context_mode ?? "declared_scope");
+      setRefreshKey((value) => value + 1);
+      setPage(0);
+      toast.success("资料来源已更新，后续读取按新选择进行");
+    } catch (error) {
+      toast.error(`资料来源更新失败：${String((error as Error)?.message ?? error)}`);
+    } finally {
+      setContextSaving(false);
+    }
+  };
 
   React.useEffect(() => {
     setPage(0);
@@ -455,6 +485,7 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       onClick={() => setRemoveTarget(asset)}
       aria-label={`将资产 ${assetLabel(asset)} 移出任务`}
       title="移出任务"
+      disabled={contextMode === "task_sources" && !asset.task_ids?.includes(Number(taskId))}
     >
       <Trash2Icon />
     </Button>
@@ -478,12 +509,24 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="min-w-0">
           <h2 className="font-medium text-sm">测试资产</h2>
-          <p className="text-muted-foreground text-xs">当前任务共关联 {totalAll} 项资产</p>
+          <p className="text-muted-foreground text-xs">{contextMode === "task_sources" ? "范围内可见" : "当前任务共关联"} {totalAll} 项资产</p>
         </div>
         <Button size="sm" onClick={() => setAddOpen(true)}>
           <PlusIcon data-icon="inline-start" />
           新增测试资产
         </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-muted-foreground text-xs">资料来源</span>
+        <Select value={contextMode} onValueChange={(value) => void changeContextMode(value as "declared_scope" | "task_sources")} disabled={!contextLoaded || contextSaving}>
+          <SelectTrigger className="h-8 w-64" aria-label="资料来源"><SelectValue /></SelectTrigger>
+          <SelectContent>
+            <SelectItem value="declared_scope">授权范围内资料（兼容）</SelectItem>
+            <SelectItem value="task_sources">仅本任务与直接来源资料</SelectItem>
+          </SelectContent>
+        </Select>
+        <span className="text-muted-foreground text-xs">保留已有成果，不中断当前执行，不改变手动暂停状态。</span>
       </div>
 
       <Tabs

@@ -10,6 +10,7 @@ import (
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/toolcall"
 	"gondar/db"
 	"gondar/intercept"
 	"gondar/sidequestion"
@@ -41,8 +42,23 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	defer stopRun(nil)
 	ctx = runCtx
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
+	ctx = toolcall.WithRunID(ctx, auditTrace.RunID())
+	ctx = toolcall.WithPromptID(ctx, toolcall.FreshID())
+	ctx = withScalarCompatibility(ctx)
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason
+	ctx = harness.WithLateToolObserver(ctx, func(ev harness.Event) {
+		if ev.ToolResult == nil || ev.ToolOutcome == nil || ev.ToolOutcome.Phase != "late_receipt" {
+			return
+		}
+		out := blocksText(ev.ToolResult.Content)
+		if ev.ToolCall != nil {
+			auditTrace.CompleteLate(ev.ToolCall.Key(), out, ev.ToolResult.IsError, ev.ToolOutcome)
+		}
+		if emit != nil {
+			emit(db.Activity{Kind: "tool_late_result", Tool: ev.ToolOutcome.ToolName, ToolUseID: ev.ToolResult.ToolUseID, IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out, Metadata: toolCallMetadata(ev.ToolCall, ev.ToolOutcome)})
+		}
+	})
 	rec := func(r db.Activity) {
 		if r.Kind == "text" || r.Kind == "tool_result" {
 			auditTrace.Append(db.InterceptContextEntry{Kind: r.Kind, Tool: r.Tool, ToolUseID: r.ToolUseID, Text: r.Detail, IsError: r.IsError})
@@ -114,28 +130,40 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				continue
 			}
 			flush()
-			toolNames[ev.ToolUse.ID] = ev.ToolUse.Name
-			failures.start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
+			key := ev.ToolUse.ID
+			if ev.ToolCall != nil && ev.ToolCall.Valid() {
+				key = ev.ToolCall.Key()
+			}
+			toolNames[key] = ev.ToolUse.Name
+			failures.start(key, ev.ToolUse.Name, ev.ToolUse.Input)
 			if watchReads {
-				reads.start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
+				reads.start(key, ev.ToolUse.Name, ev.ToolUse.Input)
 			}
 			in := string(ev.ToolUse.Input)
-			lastTool.start(ev.ToolUse.ID, ev.ToolUse.Name, in)
-			auditTrace.Start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
+			lastTool.start(key, ev.ToolUse.Name, in)
+			if ev.ToolCall != nil && ev.ToolCall.Valid() {
+				auditTrace.StartInvocation(*ev.ToolCall, ev.ToolUse.Name, ev.ToolUse.Input)
+			} else {
+				auditTrace.Start(ev.ToolUse.ID, ev.ToolUse.Name, ev.ToolUse.Input)
+			}
 			rec(db.Activity{Kind: "tool_use", Tool: ev.ToolUse.Name, ToolUseID: ev.ToolUse.ID,
-				Summary: ev.ToolUse.Name + " " + firstLine(in, 200), Detail: in})
+				Summary: ev.ToolUse.Name + " " + firstLine(in, 200), Detail: in, Metadata: toolCallMetadata(ev.ToolCall, nil)})
 		case harness.KindToolResult:
 			if ev.ToolResult == nil {
 				continue
 			}
 			flush()
 			out := blocksText(ev.ToolResult.Content)
-			lastTool.done(ev.ToolResult.ToolUseID)
-			auditTrace.Complete(ev.ToolResult.ToolUseID, out, ev.ToolResult.IsError)
-			rec(db.Activity{Kind: "tool_result", Tool: toolNames[ev.ToolResult.ToolUseID], ToolUseID: ev.ToolResult.ToolUseID,
-				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out})
+			key := ev.ToolResult.ToolUseID
+			if ev.ToolCall != nil && ev.ToolCall.Valid() {
+				key = ev.ToolCall.Key()
+			}
+			lastTool.done(key)
+			auditTrace.CompleteOutcome(key, out, ev.ToolResult.IsError, ev.ToolOutcome)
+			rec(db.Activity{Kind: "tool_result", Tool: toolNames[key], ToolUseID: ev.ToolResult.ToolUseID,
+				IsError: ev.ToolResult.IsError, Summary: firstLine(out, 200), Detail: out, Metadata: toolCallMetadata(ev.ToolCall, ev.ToolOutcome)})
 			if loopErr == nil {
-				if failure := failures.result(ev.ToolResult.ToolUseID, ev.ToolResult.IsError, out); failure != nil {
+				if failure := failures.resultWithOutcome(key, ev.ToolResult.IsError, out, ev.ToolOutcome); failure != nil {
 					loopErr = failure
 					stopRun(failure)
 					// Drain the SDK terminal event so the session retains the paired
@@ -143,7 +171,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				}
 			}
 			if loopErr == nil && watchReads {
-				if spin := reads.result(ev.ToolResult.ToolUseID, ev.ToolResult.IsError, out); spin != nil {
+				if spin := reads.result(key, ev.ToolResult.IsError, out); spin != nil {
 					loopErr = spin
 					stopRun(spin)
 				}

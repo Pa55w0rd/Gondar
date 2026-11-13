@@ -22,6 +22,8 @@ func TestPlannerFailureClassification(t *testing.T) {
 	}{
 		{nil, false, ""}, {errors.Join(agent.ErrPlannerModelError, errors.New("synthetic 503")), false, "planner_model_unavailable"},
 		{agent.ErrPlannerNoProgress, false, "planner_no_progress"}, {agent.ErrToolFailureLoop, false, "planner_tool_failure_loop"},
+		{agent.ErrToolInputLoop, false, "planner_input_loop"}, {agent.ErrToolPolicyLoop, false, "planner_policy_loop"},
+		{agent.ErrToolPrerequisiteLoop, false, "planner_prerequisite_loop"}, {agent.ErrToolOutcomeUnknownLoop, false, "planner_tool_outcome_unknown_loop"},
 		{agent.ErrPlannerReadLoop, false, "planner_read_loop"}, {agent.ErrTaskBudgetExpired, true, "task_deadline"},
 		{errors.Join(agent.ErrPlannerModelError, &agent.ModelCallTimeoutError{Limit: 20 * time.Minute}), false, "planner_model_timeout"},
 		{context.DeadlineExceeded, true, "planner_round_timeout"}, {context.Canceled, false, "other"},

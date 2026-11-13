@@ -264,7 +264,7 @@ SELECT c.id, c.name, c.nkey, c.logo, c.created_at::text, c.updated_at::text,
 FROM companies c
 LEFT JOIN assets a ON a.company_id = c.id
 GROUP BY c.id
-ORDER BY c.name`)
+ORDER BY c.name, c.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -283,14 +283,10 @@ ORDER BY c.name`)
 		return nil, err
 	}
 
-	// fetch scope rules for each company
-	for _, cws := range out {
-		cws.Scope, err = s.GetScope(cws.ID)
-		if err != nil {
-			return nil, err
-		}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
-	return out, nil
+	return out, fillCompanyScopes(s.db, out)
 }
 
 // GetScope returns all scope rules for a company.

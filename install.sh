@@ -833,14 +833,53 @@ COMPOSE
 }
 
 # ── --with-tools：宿主渗透工具 ───────────────────
+tool_package_installed(){
+  case "$1" in
+    apt) [ "$(dpkg-query -W -f='${Status}' "$2" 2>/dev/null)" = "install ok installed" ] ;;
+    dnf) rpm -q "$2" >/dev/null 2>&1 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A missing optional package must not prevent unrelated dependencies installing.
+# Re-read package state after a partial group failure; never reinstall successes.
+tool_install_group(){
+  local manager="$1"; shift
+  local package
+  local missing=() command_args=()
+  for package in "$@"; do
+    if tool_package_installed "$manager" "$package"; then
+      info "已安装，跳过：$package"
+    else
+      missing+=("$package")
+    fi
+  done
+  [ "${#missing[@]}" -gt 0 ] || return 0
+  case "$manager" in
+    apt) command_args=(apt-get "${APT_PROXY[@]}" install -y) ;;
+    dnf) command_args=(dnf "${DNF_PROXY[@]}" install -y) ;;
+    *) return 1 ;;
+  esac
+  if "${command_args[@]}" "${missing[@]}"; then return 0; fi
+  warn "分组安装未全部成功，逐项核对并仅补装仍缺失的包"
+  for package in "${missing[@]}"; do
+    tool_package_installed "$manager" "$package" && continue
+    if "${command_args[@]}" "$package"; then
+      tool_package_installed "$manager" "$package" && continue
+    fi
+    TOOL_PACKAGE_FAILURES+=("$package")
+    warn "未能确认安装：$package；其他包继续处理"
+  done
+}
+
 install_tools(){
   if [ "$MODE" = "docker" ]; then
-    warn "Docker 形态下工具固化在镜像里，不在运行时安装。"
-    warn "需要更多工具时：基于官方镜像自建（见 README「Docker 部署」），或改用 --mode=binary。"
+    warn "Docker 形态请在宿主环境页由安装助手按需安装容器内工具。"
+    warn "--with-tools 仅用于二进制部署，不在此处批量修改运行中的容器。"
     return 0
   fi
   info "安装常用渗透工具（系统源内）..."
-  local APT_PROXY=() DNF_PROXY=()
+  local APT_PROXY=() DNF_PROXY=() TOOL_PACKAGE_FAILURES=()
   if [ -n "$INSTALL_PROXY" ]; then
     APT_PROXY=(-o "Acquire::http::Proxy=$INSTALL_PROXY" -o "Acquire::https::Proxy=$INSTALL_PROXY")
     DNF_PROXY=(--setopt=proxy="$INSTALL_PROXY")
@@ -848,28 +887,22 @@ install_tools(){
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get "${APT_PROXY[@]}" update -qq || warn "apt update 失败，继续尝试"
-    # seclists 在 apt 源里没有稳定包名，单独克隆（见 install_wordlists）；
-    # 其余一次装齐，缺的包不阻断整体（不同发行版源里包名有出入）。
-    # imagemagick：报告证据拼图/文件名水印（v0.4.10 起依赖）；
-    # libreoffice-writer/calc/impress + poppler-utils：文档证据转图片预览
-    # （v0.4.21 起，Word/Excel/PPT→PDF→JPEG）。
-    apt-get "${APT_PROXY[@]}" install -y nmap masscan sqlmap hydra whatweb nikto gobuster ffuf john \
-      netcat-openbsd dnsutils whois unzip nodejs npm python3-impacket gitleaks imagemagick \
-      libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils \
-      >/dev/null 2>&1 \
-      || apt-get "${APT_PROXY[@]}" install -y nmap masscan sqlmap hydra whatweb nikto gobuster ffuf john \
-           netcat-openbsd dnsutils whois unzip nodejs npm python3-impacket imagemagick \
-           libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils \
-           >/dev/null \
-      || warn "部分 apt 工具未装上"
+    tool_install_group apt ca-certificates curl git unzip python3 python3-venv python3-pip
+    tool_install_group apt nmap masscan sqlmap hydra whatweb nikto gobuster ffuf john \
+      netcat-openbsd dnsutils whois nodejs npm python3-impacket gitleaks
+    tool_install_group apt imagemagick libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils
   elif command -v dnf >/dev/null 2>&1; then
-    dnf "${DNF_PROXY[@]}" install -y nmap masscan sqlmap hydra whatweb nikto john nmap-ncat bind-utils unzip \
-      nodejs python3-impacket ImageMagick libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils \
-      || warn "dnf 部分包缺失，已装可用项"
+    tool_install_group dnf ca-certificates curl git unzip python3 python3-pip
+    tool_install_group dnf nmap masscan sqlmap hydra whatweb nikto john nmap-ncat bind-utils nodejs python3-impacket
+    tool_install_group dnf ImageMagick libreoffice-writer libreoffice-calc libreoffice-impress poppler-utils
   else
     warn "未识别的包管理器，跳过系统源工具安装"
   fi
-  ok "系统源工具安装完成"
+  if [ "${#TOOL_PACKAGE_FAILURES[@]}" -gt 0 ]; then
+    warn "安装检查完成，仍缺失：${TOOL_PACKAGE_FAILURES[*]}；请在宿主环境页核对可用状态后按需补装。"
+  else
+    ok "系统源工具安装检查完成"
+  fi
 
   # 非系统源工具（Go 系 / GitHub Release），装不上的在 Web「系统 → 宿主环境」页按需装
   warn "其他工具可在宿主环境页检测版本后安装；已可用且没有确认更新的工具无需重装。"

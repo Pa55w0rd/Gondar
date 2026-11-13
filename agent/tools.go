@@ -13,6 +13,7 @@ import (
 
 	acperm "github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/toolcall"
 	"gondar/db"
 	"gondar/hosttools"
 )
@@ -29,6 +30,10 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64, tokens
 		var p map[string]any
 		_ = json.Unmarshal(n.Payload, &p)
 		m := map[string]any{"id": n.ID, "summary": p["summary"], "state": n.State}
+		if execution := db.ExecutionFromNode(n); execution.Uncertain || execution.PriorUncertainRun != "" {
+			m["execution_receipt_unknown"] = true
+			m["resume_note"] = "先核对已有及晚到回执，未知不是从未执行；不原样重放可能已执行的操作。"
+		}
 		if len(tokens) > 0 {
 			if tok, ok := tokens[n.ID]; ok && tok > 0 {
 				m["tokens"] = tok
@@ -548,6 +553,9 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// frontier_open：开放意图真实总数（open_intents 只是其中优先级最高的前 N 条截断视图）。
 	if fo, err := t.ts.CountOpenIntents(); err == nil {
 		out["frontier_open"] = fo
+		if fo >= 32 {
+			out["backlog_advice"] = "待执行方向较多：优先已有高价值方向；仅按新事实退役已失效的open意图，不以年龄、token或零漏洞清队列。新增方向需与队列实质不同。运行完成、发现和人工变更仍会立即唤醒规划。"
+		}
 	} else {
 		out["frontier_open"] = len(fr)
 	}
@@ -558,8 +566,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
 	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
 	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	if page, err := t.ts.ListVerifications(context.Background(), db.VerificationFilter{Limit: 1}); err == nil {
-		out["verification"] = map[string]any{"recorded_cases": page.RecordedCases, "states": page.LatestStates, "scope": "只统计最新验证格；未登记不等于已测，资产事实锚定率不代表输入/身份全覆盖"}
+	if page, err := t.ts.ListVerifications(context.Background(), db.VerificationFilter{Limit: 24}); err == nil {
+		out["verification"] = map[string]any{"recorded_cases": page.RecordedCases, "states": page.LatestStates,
+			"followup_candidates": verificationFollowups(page), "candidate_window": len(page.Cases), "has_older_cases": page.HasMore,
+			"scope": "只统计最新验证格；候选来自最近已登记格，先读旧证据再判断可执行性；未登记不等于已测，资产事实锚定率不代表输入/身份全覆盖"}
 	}
 	out["facts"] = len(factNodes) // 探索事实/结论数（含否定结论）
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
@@ -1538,16 +1548,22 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		"vulnclass": str("漏洞类别,【必须】从标准类别里选:" + db.VulnClassPromptText() + "。具体 CVE/漏洞编号写进 name,类别选「已知漏洞」;实在不属于任何一类才用「其他」"), "name": str("漏洞名称"), "severity": str("critical|high|medium|low"), "summary": str("发现摘要"),
 		"intent_id": idp("当前任务的意图 id"), "asset_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "受影响资产 id"},
 		"evidence":         str("证据/PoC 文本"),
+		"evidence_mode":    str("runtime（默认，引用已实际执行的回执）|material（旧记录、归档或附件的原件核对；不宣称新运行）"),
+		"verification_ref": findingVerificationRefSchema(),
+		"evidence_refs":    findingEvidenceRefsSchema(),
 		"evidence_hint_id": idp("可选：本任务中对应此漏洞的提示节点 ID，自动携带其结构化 traffic_refs；不能引用继承提示或其他漏洞的提示"),
 		"traffic_refs": map[string]any{"type": "array", "description": "可选；HTTP/HTTPS 漏洞先检索并逐条核实请求/响应确实支持漏洞结论，再按复现顺序填写真实 ID。TCP 等非 HTTP 漏洞、未采集或找不到确切记录时省略或传 []，不阻止上报；可在 evidence 说明原因并提供其他可验证证据。不要猜测 ID、按域名/时间推定关联或仅为补包重复探测。用途 baseline 正常对照 / proof 漏洞证明 / verification 补充验证 / supporting 辅助证据。若某个 ID 不存在，漏洞仍会正常入库，该 ID 会在返回值的 skipped_traffic_refs 里列出，可用 traffic_get 核实后用 bind_finding_traffic 补绑。",
 			"items": obj(map[string]any{"traffic_id": str("traffic_search 返回的真实流量 ID"), "role": map[string]any{"type": "string", "enum": []string{"baseline", "proof", "verification", "supporting"}}, "note": str("该流量如何支持漏洞结论")}, "traffic_id")},
 	}, "vulnclass", "severity", "summary"), func(ctx context.Context, in json.RawMessage) (actool.Result, error) {
 		var a struct {
 			VulnClass, Name, Severity, Summary, Evidence string
-			IntentID                                     json.RawMessage   `json:"intent_id"`
-			AssetIDs                                     []json.RawMessage `json:"asset_ids"`
-			TrafficRefs                                  []db.TrafficRef   `json:"traffic_refs"`
-			EvidenceHintID                               json.RawMessage   `json:"evidence_hint_id"`
+			IntentID                                     json.RawMessage            `json:"intent_id"`
+			AssetIDs                                     []json.RawMessage          `json:"asset_ids"`
+			TrafficRefs                                  []db.TrafficRef            `json:"traffic_refs"`
+			EvidenceHintID                               json.RawMessage            `json:"evidence_hint_id"`
+			EvidenceMode                                 string                     `json:"evidence_mode"`
+			VerificationRef                              *db.FindingVerificationRef `json:"verification_ref"`
+			EvidenceRefs                                 []db.VerificationEvidence  `json:"evidence_refs"`
 		}
 		if err := json.Unmarshal(in, &a); err != nil {
 			return actool.Errorf(err.Error()), nil
@@ -1565,7 +1581,8 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		a.Summary, a.Evidence = clean.Summary, clean.Evidence
 		// 证据门槛（v0.4.5）：critical/high 需要足量可核验证据；不足时打回，
 		// 模型可补证据或降级后重试，而不是让"一句话高危"进入报告。
-		if msg := validateFindingEvidence(a.Severity, a.Evidence); msg != "" {
+		hasStructuredSources := a.VerificationRef != nil || len(a.EvidenceRefs) > 0 || len(a.TrafficRefs) > 0
+		if msg := validateFindingEvidence(a.Severity, a.Evidence); msg != "" && !hasStructuredSources {
 			return actool.Errorf(msg), nil
 		}
 		// 证据逐字回验（v0.4.29，P0b #2，PentestGPT 机制自研）：先告警后拦截。
@@ -1576,11 +1593,11 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			matched, total := ledger.VerifyEvidence(a.Evidence)
 			switch evidenceVerdict(matched, total) {
 			case "none":
-				if mode == EvidenceVerifyBlock && (a.Severity == "critical" || a.Severity == "high") {
+				if mode == EvidenceVerifyBlock && !hasStructuredSources && (a.Severity == "critical" || a.Severity == "high") {
 					return actool.Errorf(fmt.Sprintf(
 						"证据逐字回验未通过：evidence 里没有任何一行能在本次工具输出中找到出处（已比对 %d 行有效内容）。"+
 							"critical/high 必须带本会话真实命令输出：请把工具回显中的关键行原样粘进 evidence（命令 + 输出特征），"+
-							"或降级为 medium 后再报，或改用 record_fact 记为待验证线索。", total)), nil
+							"或引用当前任务已保存的 verification_ref/evidence_refs；出处不足时用 record_fact 保存待验证线索，不能靠降低严重度绕过出处要求。", total)), nil
 				}
 				verifyNote = fmt.Sprintf("⚠️ 证据出处核对：0/%d 行可在本次工具输出中逐字找到——报告读者将无法复核，建议补粘命令与输出原文。", total)
 			case "partial":
@@ -1592,6 +1609,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// models routinely emit fields anyway — failing here would discard a confirmed
 		// finding over a stray parameter. The success path below reports evidence_status
 		// "not_bound" with the "已关闭，可在页面人工关联" note, which is what the caller needs.
+		provenanceTraffic := append([]db.TrafficRef(nil), a.TrafficRefs...)
 		if !findingTrafficBindingEnabled() {
 			a.TrafficRefs, a.EvidenceHintID = nil, nil
 		}
@@ -1603,6 +1621,19 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			return actool.Errorf(err.Error()), nil
 		}
 		input := db.RecordFindingInput{TaskID: t.taskID, ExplorationID: t.ts.ID(), IntentID: pid(a.IntentID), VulnClass: a.VulnClass, Name: a.Name, Severity: a.Severity, Summary: a.Summary, Evidence: a.Evidence, Worker: t.worker, AssetIDs: pidList(a.AssetIDs)}
+		identity, hasIdentity := toolcall.IdentityFrom(ctx)
+		runInfo := RunInfoFrom(ctx)
+		input.Automatic = hasIdentity || runInfo.Kind != ""
+		input.ExecutionRunID = identity.RunID
+		if input.Automatic {
+			if runInfo.IntentID > 0 {
+				if input.IntentID > 0 && input.IntentID != runInfo.IntentID {
+					return findingEvidenceError(ctx, fmt.Errorf("%w：当前worker不能登记其它意图的发现", db.ErrFindingEvidenceIncomplete)), nil
+				}
+				input.IntentID = runInfo.IntentID
+			}
+			input.Provenance = &db.FindingProvenanceInput{Mode: a.EvidenceMode, Verification: a.VerificationRef, Evidence: a.EvidenceRefs, TrafficRefs: provenanceTraffic}
+		}
 		var recorded *db.RecordedFinding
 		if t.findingRecorder != nil {
 			recorded, err = t.findingRecorder.Record(ctx, input, refs)
@@ -1612,18 +1643,20 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			recorded, err = t.ts.RecordFinding(ctx, input)
 		}
 		if err != nil {
-			return actool.Errorf(err.Error()), nil
+			return findingEvidenceError(ctx, err), nil
 		}
-		if t.notifyFinding != nil {
+		if !recorded.Replay && t.notifyFinding != nil {
 			iid := input.IntentID
 			if iid <= 0 {
 				iid = t.ownerNode
 			}
 			t.notifyFinding(iid, a.Summary)
-		} else if t.notify != nil {
+		} else if !recorded.Replay && t.notify != nil {
 			t.notify()
 		}
-		t.writes.Findings++
+		if !recorded.Replay {
+			t.writes.Findings++
+		}
 		// Keep the first line's node-ID contract for existing reporter triggers.
 		for i := range recorded.Traffic.Bindings {
 			recorded.Traffic.Bindings[i].Snapshot.ReqHead = ""
@@ -1651,6 +1684,9 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 			if len(recorded.Traffic.Bindings) == 0 {
 				result.EvidenceStatus = "merged"
 			}
+			if recorded.Replay {
+				result.EvidenceNote = "该来源和内容此前已保存，未重复追加或生成新进展；无需重报，请继续其它方向。"
+			}
 		}
 		// 部分引用没挂上（流量 ID 不存在/正文不可读）：漏洞已入库，但要让模型
 		// 知道哪几条证据没生效，否则它会以为证据齐全、报告里就少了这段。
@@ -1676,12 +1712,13 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 // must NOT be stuffed into the asset graph via upsert_asset.
 // factItem 是 record_fact 批量/单条的一条事实。
 type factItem struct {
-	Summary    string            `json:"summary"`
-	Detail     string            `json:"detail"`
-	Evidence   string            `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
-	Confidence string            `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
-	IntentID   json.RawMessage   `json:"intent_id"`
-	AssetIDs   []json.RawMessage `json:"asset_ids"`
+	Summary      string                    `json:"summary"`
+	Detail       string                    `json:"detail"`
+	Evidence     string                    `json:"evidence"`   // 一行关键证据（命令+关键输出行），支撑结论、便于事后核对
+	Confidence   string                    `json:"confidence"` // observed（直接看到）| inferred（据现象推断）
+	IntentID     json.RawMessage           `json:"intent_id"`
+	AssetIDs     []json.RawMessage         `json:"asset_ids"`
+	EvidenceRefs []db.VerificationEvidence `json:"evidence_refs"`
 }
 
 // recordOneFact 写一条 fact 节点并连到意图（intent→yields→fact）。defaultIntent 为
@@ -1696,6 +1733,12 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 	}
 	if e := strings.TrimSpace(it.Evidence); e != "" {
 		payload["evidence"] = e
+	}
+	if len(it.EvidenceRefs) > 16 {
+		return 0, fmt.Errorf("每条事实最多16个原件引用")
+	}
+	if len(it.EvidenceRefs) > 0 {
+		payload["evidence_refs"] = it.EvidenceRefs
 	}
 	if c := strings.TrimSpace(it.Confidence); c != "" {
 		payload["confidence"] = c
@@ -1836,13 +1879,14 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 		"  · confidence=observed（输出里直接看到）| inferred（据现象推断）。\n"+
 		"  · **否定类结论**（不可注入/端口关闭/未发现入口等）只写\"观察 + 试探性读法\"——陈述你实际看到什么，方向是否放弃由规划者综合全局定；务必给 evidence，手段没穷尽或证据弱（含只探一次、看起来像）标 inferred，确已穷尽且直接看到才标 observed。",
 		obj(map[string]any{
-			"facts":      map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
-			"summary":    str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
-			"intent_id":  idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
-			"detail":     str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
-			"evidence":   str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
-			"confidence": str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
-			"asset_ids":  map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
+			"facts":         map[string]any{"type": "array", "description": "【有多条不同结论时用】事实数组，元素字段同下方顶层字段（summary/detail/evidence/confidence/intent_id/asset_ids）；省略 intent_id 则用顶层 intent_id。返回 ids 与本数组等长、同序。", "items": map[string]any{"type": "object"}},
+			"summary":       str("对本次探索结论的【总结性一句话】（是对 detail 的概括）"),
+			"intent_id":     idp("产生本事实的意图 id（你领到的意图；批量时作为各条默认）"),
+			"detail":        str("本事实的相关细节：把这次探索的多个观察事实都写进这里"),
+			"evidence":      str("【一行】关键证据：命令 + 最能证明结论的那一两行输出。务必简洁，不要粘大段输出（细节放 detail）。"),
+			"evidence_refs": findingEvidenceRefsSchema(),
+			"confidence":    str("observed（输出里直接看到）| inferred（据现象推断）。否定结论务必如实标注。"),
+			"asset_ids":     map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "相关资产 id（可选，0/1/多个）：该事实涉及哪些资产"},
 		}),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct {
@@ -2526,7 +2570,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.recordPlannerWait(), t.addExplorationGoal(),
+		t.recordPlannerWait(), t.addExplorationGoal(), t.retireIntents(),
 		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		t.listArtifacts(), t.previewEvidence(), t.proposeLesson(), t.recallLessons(),
@@ -2559,6 +2603,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.diffResponses(),
 		// api_contract：读目标暴露的 API 契约文件，拿到比爬虫更准的接口清单。
 		t.apiContractTool(),
+		t.frontendInventoryTool(),
 		// search_recent_critical：按【时间】查最近披露的高危漏洞（不需先知道组件名/CVE 号）。
 		t.searchRecentCritical(),
 	}

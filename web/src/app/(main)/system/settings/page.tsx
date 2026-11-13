@@ -42,6 +42,8 @@ export default function SystemSettingsPage() {
   const [loaded, setLoaded] = React.useState(false);
   const [saving, setSaving] = React.useState(false);
   const [savingKey, setSavingKey] = React.useState(false);
+  const [searchAPIKeySet, setSearchAPIKeySet] = React.useState(false);
+  const [searchAPIKey, setSearchAPIKey] = React.useState("");
   const [pyInterp, setPyInterp] = React.useState("");
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
@@ -80,6 +82,7 @@ export default function SystemSettingsPage() {
     setBackend(s.web_search_backend || "ddgs");
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
+    setSearchAPIKeySet(!!s.deepseek_search_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
     setEgressProbeUrl(s.egress_probe_url ?? "");
@@ -425,6 +428,7 @@ export default function SystemSettingsPage() {
     api
       .testWebSearch({
         web_search_backend: backend,
+        deepseek_search_api_key: searchAPIKey,
         web_search_proxy: proxyInput.trim(),
         brave_search_api_key: braveKeyInput,
         tavily_search_api_key: tavilyKeyInput,
@@ -707,9 +711,33 @@ export default function SystemSettingsPage() {
                     <SelectItem value="ddgs">DuckDuckGo（ddgs · 免费无 Key）</SelectItem>
                     <SelectItem value="brave-free">Brave（免费版 · 需 Key）</SelectItem>
                     <SelectItem value="tavily">Tavily（需 Key）</SelectItem>
-                    <SelectItem value="deepseek">DeepSeek（官方）</SelectItem>
+                    <SelectItem value="deepseek-search">DeepSeek Search/Fetch（独立API）</SelectItem>
+                    <SelectItem value="deepseek">DeepSeek（模型内置搜索）</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+            )}
+
+            {webSearch && backend === "deepseek-search" && (
+              <div className="flex flex-col gap-2 rounded-md border border-border/60 bg-muted/30 p-3">
+                <Label htmlFor="search-api-key">独立 Search/Fetch API 密钥{searchAPIKeySet && <span className="ml-2 text-emerald-500 text-xs">已配置</span>}</Label>
+                <p className="text-muted-foreground text-xs leading-relaxed">搜索返回标题、链接和摘要，并提供 SearchFetch 读取公开参考正文。使用单独密钥，按服务请求计费；与当前聊天模型无关。搜索服务通过上方搜索出口代理访问，公开文档的抓取由服务端执行，目标访问仍使用原有留痕工具。</p>
+                <div className="flex gap-2">
+                  <Input id="search-api-key" type="password" autoComplete="off" value={searchAPIKey} placeholder={searchAPIKeySet ? "已配置，留空不变" : "输入独立API密钥"} onChange={(event) => setSearchAPIKey(event.target.value)} disabled={savingKey} />
+                  <Button disabled={savingKey || !searchAPIKey.trim()} onClick={async () => {
+                    setSavingKey(true);
+                    try { apply(await api.setSettings({ deepseek_search_api_key: searchAPIKey.trim() })); setSearchAPIKey(""); toast.success("已保存独立检索密钥"); }
+                    catch (error) { toast.error(`保存失败：${(error as Error).message}`); }
+                    finally { setSavingKey(false); }
+                  }}>保存</Button>
+                  {searchAPIKeySet && <Button variant="outline" disabled={savingKey} onClick={async () => {
+                    setSavingKey(true);
+                    try { apply(await api.setSettings({ deepseek_search_api_key: "" })); setSearchAPIKey(""); toast.success("已清除独立检索密钥"); }
+                    catch (error) { toast.error(`清除失败：${(error as Error).message}`); }
+                    finally { setSavingKey(false); }
+                  }}>清除</Button>}
+                </div>
+                {!searchAPIKeySet && <p className="text-amber-500 text-xs">尚未配置密钥，搜索工具保持关闭；其他任务能力照常使用。</p>}
               </div>
             )}
 

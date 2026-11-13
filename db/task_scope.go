@@ -80,6 +80,12 @@ func (s *AssetStore) upsertTaskScopeResult(ts TaskScope) (bool, error) {
 INSERT INTO task_scope(task_id, kind, company_id, domain, net, value, source, reason)
 VALUES ($1,$2,$3,$4,$5::cidr,$6,$7,NULLIF($8,''))
 ON CONFLICT DO NOTHING`
+	if src == "auto" {
+		query = `INSERT INTO task_scope(task_id,kind,company_id,domain,net,value,source,reason)
+SELECT $1,$2,$3,$4,$5::cidr,$6,$7,NULLIF($8,'')
+WHERE EXISTS(SELECT 1 FROM tasks WHERE id=$1 AND deleted_at IS NULL AND asset_context_mode='declared_scope')
+ON CONFLICT DO NOTHING`
+	}
 	var (
 		result sql.Result
 		err    error
@@ -214,6 +220,25 @@ func (s *AssetStore) AddAgentScope(taskID int64, kind, value, reason, source str
 	default:
 		return ts, fmt.Errorf("不支持的 kind: %s（company/root_domain/subdomain/ip/cidr/icp/keyword）", kind)
 	}
+	if source != "manual" {
+		mode, err := s.TaskAssetContextMode(taskID)
+		if err != nil {
+			return ts, err
+		}
+		if mode == AssetContextTaskSources {
+			existing, err := s.ListTaskScopeWithSources(taskID)
+			if err != nil {
+				return ts, err
+			}
+			for _, scope := range existing {
+				sameCompany := (scope.CompanyID == nil && ts.CompanyID == nil) || (scope.CompanyID != nil && ts.CompanyID != nil && *scope.CompanyID == *ts.CompanyID)
+				if scope.Kind == ts.Kind && scope.Domain == ts.Domain && scope.Net == ts.Net && scope.Value == ts.Value && sameCompany {
+					return scope, nil
+				}
+			}
+			return ts, fmt.Errorf("当前资料模式不允许自动扩大声明范围；现有范围仍有效，新增范围须由用户在测试资产页明确登记")
+		}
+	}
 	if err := s.upsertTaskScope(ts); err != nil {
 		return ts, err
 	}
@@ -277,12 +302,13 @@ type CoverageByType struct {
 // NOT a precise metric. Denominator = assets matching any active task_scope row;
 // Tested = those anchored to at least one fact node in the exploration.
 type Coverage struct {
-	Enabled     bool             `json:"enabled"`     // 资产覆盖度功能是否开启；false 时其余字段为零值
-	ScopeRows   int              `json:"scope_rows"`  // 0 → 范围未锚定
-	Denominator int              `json:"denominator"` // 范围内资产数
-	Tested      int              `json:"tested"`      // 已测(约)
-	Pct         *float64         `json:"pct"`         // 覆盖度；分母 0 时 null
-	ByType      []CoverageByType `json:"by_type"`     // 按资产类型的 总数/已测
+	Enabled        bool             `json:"enabled"`         // 资产覆盖度功能是否开启；false 时其余字段为零值
+	ScopeRows      int              `json:"scope_rows"`      // 0 → 范围未锚定
+	Denominator    int              `json:"denominator"`     // 范围内资产数
+	Tested         int              `json:"tested"`          // 已测(约)
+	HistoricalOnly int              `json:"historical_only"` // 历史锚点仍可读，不计入当前执行覆盖分母
+	Pct            *float64         `json:"pct"`             // 覆盖度；分母 0 时 null
+	ByType         []CoverageByType `json:"by_type"`         // 按资产类型的 总数/已测
 }
 
 // CoverageEnabled reports whether a task has the asset-coverage feature turned on
@@ -326,6 +352,11 @@ tested AS (
 // TaskCoverage computes rough per-type coverage for a task. taskID indexes
 // task_scope + assets; expID indexes the fact anchors. Reference figure only.
 func (s *AssetStore) TaskCoverage(taskID, expID int64) (*Coverage, error) {
+	if mode, err := s.TaskAssetContextMode(taskID); err != nil {
+		return nil, err
+	} else if mode == AssetContextTaskSources {
+		return s.TaskCoverageWithSources(taskID)
+	}
 	cov := &Coverage{ByType: []CoverageByType{}}
 	_ = s.db.QueryRow(`SELECT count(*) FROM task_scope WHERE task_id=$1`, taskID).Scan(&cov.ScopeRows)
 	rows, err := s.db.Query(`WITH `+covTargetCTE+`
@@ -608,6 +639,11 @@ func coverageNodeLabel(n *CoverageGraphNode) string {
 // ListUntestedAssets returns a task's in-scope, not-yet-tested assets, optionally
 // filtered by asset type, paginated. Returns the page + the total count. limit<=0 → 10.
 func (s *AssetStore) ListUntestedAssets(taskID, expID int64, typ string, limit, offset int) ([]CoverageAsset, int, error) {
+	if mode, err := s.TaskAssetContextMode(taskID); err != nil {
+		return nil, 0, err
+	} else if mode == AssetContextTaskSources {
+		return s.ListUntestedAssetsWithSources(taskID, typ, limit, offset)
+	}
 	if limit <= 0 {
 		limit = 10
 	}

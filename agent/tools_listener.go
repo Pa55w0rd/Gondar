@@ -29,7 +29,7 @@ type ConnectBack struct {
 }
 
 // connectBackFn 由 server 注入：把监听端口解析成目标应连的地址
-//（direct=本机网卡；ssh/manual=公网中转）。nil=未注入（回落 127.0.0.1）。
+// （direct=本机网卡；ssh/manual=公网中转）。nil=未注入（回落 127.0.0.1）。
 var connectBackFn func(port int) ConnectBack
 
 // SetConnectBackResolver wires the C2 egress resolver.
@@ -138,9 +138,11 @@ func (t *ToolSet) listenerSessions() actool.CoreTool {
 			if !ok {
 				return actool.Errorf(fmt.Sprintf("监听器 %q 不存在（用 listener_start 先启动）", a.Name)), nil
 			}
+			stats, _ := listenerMgr.Stats(strings.TrimSpace(a.Name))
 			return jsonResult(map[string]any{
 				"name":     a.Name,
 				"sessions": sessions,
+				"stats":    stats,
 				"note":     "preview 是每个会话捕获的前 64KB；交互式接管用 Bash nc/socat 连本机端口",
 			})
 		},

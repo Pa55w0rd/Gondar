@@ -9,6 +9,7 @@ import (
 	"net/textproto"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -40,8 +41,14 @@ func TestClipboardUploadDoesNotClobberPreviousImage(t *testing.T) {
 	if err := os.WriteFile(first, []byte("first image"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got := uniqueUploadPath(dir, name); got != filepath.Join(dir, "pasted-file-1-1.png") {
-		t.Fatalf("repeated paste path=%q", got)
+	s := &Server{m: &Manager{dir: dir}}
+	ws, err := s.openWorkspace()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ws.root.Close()
+	if got, _, err := saveChatUpload(ws, ".", name, strings.NewReader("second image")); err != nil || got != "pasted-file-1-1.png" {
+		t.Fatalf("repeated paste path=%q err=%v", got, err)
 	}
 	if content, err := os.ReadFile(first); err != nil || string(content) != "first image" {
 		t.Fatalf("previous clipboard evidence changed: %q %v", content, err)

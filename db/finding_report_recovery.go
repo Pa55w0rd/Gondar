@@ -163,7 +163,10 @@ func (d *DB) CompleteFindingReportRecovery(ctx context.Context, job *FindingRepo
 		if err == nil && n != 1 {
 			return ErrFindingReportRecoveryStale
 		}
-		return err
+		if err != nil {
+			return err
+		}
+		return storeFindingReportSourceTx(ctx, tx, job.FindingID, recoveryReportSource(job, utf8Clean(report), now))
 	})
 }
 

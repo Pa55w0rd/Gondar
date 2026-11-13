@@ -20,6 +20,8 @@ type InterceptContextEntry struct {
 // polling/list responses; old rows have no audit instead of reconstructed data.
 type InterceptAudit struct {
 	RunID            string                  `json:"run_id,omitempty"`
+	PromptID         string                  `json:"prompt_id,omitempty"`
+	InvocationID     string                  `json:"invocation_id,omitempty"`
 	ToolUseID        string                  `json:"tool_use_id,omitempty"`
 	Correlation      string                  `json:"correlation"` // exact | ambiguous | unavailable
 	InputDigest      string                  `json:"input_digest"`
@@ -42,6 +44,7 @@ type InterceptAudit struct {
 	Output           string                  `json:"output,omitempty"`
 	OutputTruncated  bool                    `json:"output_truncated,omitempty"`
 	ExecutionEndedAt *time.Time              `json:"execution_ended_at,omitempty"`
+	LateReceipt      json.RawMessage         `json:"late_receipt,omitempty"`
 }
 
 type InterceptDetail struct {
@@ -99,6 +102,17 @@ func (d *DB) ResolveIntercept(id int64, status, action, reason string) (bool, er
 // CompleteIntercept only updates the exact recorded call after it was allowed.
 // A blocked tool_result must never be presented as a failed execution.
 func (d *DB) CompleteIntercept(id int64, runID, toolUseID, status, output string, truncated bool) error {
+	return d.completeInterceptIdentity(id, runID, "", toolUseID, status, output, truncated)
+}
+
+func (d *DB) CompleteInterceptInvocation(id int64, runID, invocationID, toolUseID, status, output string, truncated bool) error {
+	if invocationID == "" {
+		return ErrInterceptExecutionUnavailable
+	}
+	return d.completeInterceptIdentity(id, runID, invocationID, toolUseID, status, output, truncated)
+}
+
+func (d *DB) completeInterceptIdentity(id int64, runID, invocationID, toolUseID, status, output string, truncated bool) error {
 	patch, err := json.Marshal(map[string]any{
 		"execution_status": status, "output": output, "output_truncated": truncated,
 		"execution_ended_at": time.Now().UTC(),
@@ -108,7 +122,27 @@ func (d *DB) CompleteIntercept(id int64, runID, toolUseID, status, output string
 	}
 	_, err = d.Exec(`UPDATE intercept_pending SET audit=audit || $4::jsonb
 		WHERE id=$1 AND audit->>'run_id'=$2 AND audit->>'tool_use_id'=$3
+		AND COALESCE(audit->>'invocation_id','')=$5
 		AND audit->>'effective_action'='allow' AND audit->>'execution_status'='awaiting_result'`,
-		id, runID, toolUseID, patch)
+		id, runID, toolUseID, patch, invocationID)
+	return err
+}
+
+// AppendInterceptLateReceipt preserves the primary interrupted/unknown decision.
+// It adds one exact host receipt instead of rewriting an earlier terminal audit.
+func (d *DB) AppendInterceptLateReceipt(id int64, runID, invocationID, toolUseID, status, output string, truncated bool) error {
+	if invocationID == "" {
+		return ErrInterceptExecutionUnavailable
+	}
+	if status != "late_succeeded" && status != "late_failed" && status != "late_unknown" {
+		return ErrInterceptExecutionUnavailable
+	}
+	patch, err := json.Marshal(map[string]any{"late_receipt": map[string]any{"status": status, "output": output, "output_truncated": truncated, "received_at": time.Now().UTC()}})
+	if err != nil {
+		return err
+	}
+	_, err = d.Exec(`UPDATE intercept_pending SET audit=audit || $5::jsonb
+WHERE id=$1 AND audit->>'run_id'=$2 AND audit->>'invocation_id'=$3 AND audit->>'tool_use_id'=$4
+AND audit->>'execution_status'='unknown' AND NOT (audit ? 'late_receipt')`, id, runID, invocationID, toolUseID, patch)
 	return err
 }

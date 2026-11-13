@@ -30,8 +30,9 @@ import (
 // WebSearchOpts is the web-search backend selection the server pushes into each
 // agent (planner/worker/main). Enabled=false leaves the web_search tool off.
 // Backend is "ddgs" (no key), "brave-free" (BraveKey required), "tavily"
-// (TavilyKey required), or "deepseek" (DeepSeek* required, filled from the
-// active LLM profile). It maps directly onto agentcore.Options.
+// (TavilyKey required), "deepseek" (DeepSeek* from the active LLM profile), or
+// "deepseek-search" (DeepSeekAPIKey from its separate search setting, unrelated
+// to the main model profile). It maps directly onto agentcore.Options.
 // Proxy is a dedicated egress proxy for the search request (http/https/socks5),
 // independent of the traffic-recording MITM proxy — set it when the search endpoint
 // is only reachable via a VPN/SOCKS proxy. Empty = direct.
@@ -46,8 +47,7 @@ type WebSearchOpts struct {
 	BraveKey  string
 	TavilyKey string
 	Proxy     string
-	// DeepSeek* 来自当前激活的 LLM 配置(仅 anthropic 格式的 DeepSeek 官方端点)，
-	// 不单独配置，随 LLM 配置切换而变。
+	// deepseek 的 DeepSeek* 来自激活 LLM；deepseek-search 的 APIKey 来自独立搜索配置。
 	DeepSeekBaseURL string
 	DeepSeekAPIKey  string
 	DeepSeekModel   string
@@ -357,6 +357,9 @@ func renderIntentTask(intent *db.Node) string {
 	// hypothesis/success_criteria 结构化渲染（v0.3.95 B3）：planner 写了就带出，
 	// worker 的「复述假设→判成没成」作业程序直接以此为锚。
 	extra := ""
+	if execution := db.ExecutionFromNode(intent); execution.Uncertain || execution.PriorUncertainRun != "" {
+		extra += "\n【宿主执行回执警告】此前执行有已开始但未确认的操作（execution_result_unknown）。保留已有成果，先核对工具记录、实际状态及晚到回执；暂停/继续不表示上次从未执行。仅补尚未完成的步骤，不原样重放可能已执行的副作用，也不把未知当阴性。"
+	}
 	var p struct {
 		Hypothesis      string `json:"hypothesis"`
 		SuccessCriteria string `json:"success_criteria"`
@@ -514,7 +517,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	ids := intentAssetIDs(intent)
 	if as != nil {
 		if len(ids) > 0 {
-			if assets, err := as.GetByIDs(ids); err == nil && len(assets) > 0 {
+			if assets, err := as.GetWorkerAssets(taskID, ids); err == nil && len(assets) > 0 {
 				if b, err := json.Marshal(assets); err == nil {
 					sysBody += "\n\n本意图 asset_ids 对应的目标资产：\n" + string(b)
 				}

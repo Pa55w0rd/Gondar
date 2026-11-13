@@ -18,7 +18,7 @@ set -uo pipefail
 
 # MSYS（Git Bash）下 pwd 给的是 /d/... 形式，bash -n 与 grep 读不了；
 # 转成 Windows 绝对路径再交给子进程。
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -W 2>/dev/null || cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && (pwd -W 2>/dev/null || pwd))"
 TARGET="${1:-$SCRIPT_DIR/install.sh}"
 
 fail=0

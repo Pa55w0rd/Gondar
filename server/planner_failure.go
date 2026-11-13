@@ -35,6 +35,14 @@ func plannerFailureCode(err error, roundTimedOut bool) string {
 		return "planner_waiting"
 	case errors.Is(err, agent.ErrPlannerReadLoop):
 		return "planner_read_loop"
+	case errors.Is(err, agent.ErrToolInputLoop):
+		return "planner_input_loop"
+	case errors.Is(err, agent.ErrToolPolicyLoop):
+		return "planner_policy_loop"
+	case errors.Is(err, agent.ErrToolPrerequisiteLoop):
+		return "planner_prerequisite_loop"
+	case errors.Is(err, agent.ErrToolOutcomeUnknownLoop):
+		return "planner_tool_outcome_unknown_loop"
 	case errors.Is(err, agent.ErrToolFailureLoop):
 		return "planner_tool_failure_loop"
 	default:
@@ -115,7 +123,7 @@ func (e *Engine) plannerRetryLimit() time.Duration {
 
 func (e *Engine) shouldRetryIdlePlanner(ctx context.Context, t *Task, code string) bool {
 	switch code {
-	case "planner_no_progress", "planner_read_loop", "planner_tool_failure_loop", "planner_model_unavailable", "planner_model_timeout", "planner_round_timeout", "planner_response_interrupted":
+	case "planner_no_progress", "planner_read_loop", "planner_tool_failure_loop", "planner_input_loop", "planner_policy_loop", "planner_prerequisite_loop", "planner_tool_outcome_unknown_loop", "planner_model_unavailable", "planner_model_timeout", "planner_round_timeout", "planner_response_interrupted":
 	default:
 		return false
 	}

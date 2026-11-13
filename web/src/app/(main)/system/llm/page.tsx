@@ -402,18 +402,21 @@ function ProfileSheet({
     try {
       // 用配置实际会跑的思考参数来测，这样不支持该字段的模型在这里就失败，
       // 而不是等到跑任务时才炸。传 profile id：Key 输入框留空时用已存的 Key。
-      const r = await api.testLLM(
-        format,
+      const r = await api.testLLM({
+        provider: format,
         model,
-        baseUrl,
-        apiKey,
+        base_url: baseUrl,
+        api_key: apiKey,
         proxy,
-        toStore(thinkingType),
-        toStore(effort),
-        profileId,
+        thinking_type: toStore(thinkingType),
+        reasoning_effort: toStore(effort),
+        profile_id: profileId,
         streaming,
-        sessionHeaderKey.trim(),
-      );
+        session_header_key: sessionHeaderKey.trim(),
+        max_tokens: Math.max(0, Number(maxTokens) || 0),
+        max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
+        max_concurrent: Number(maxConcurrent),
+      });
       // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
       if (r.ok)
         toast.success(`连接成功 · ${r.latency_ms ?? "?"}ms · ${r.model ?? model}`, {

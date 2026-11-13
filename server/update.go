@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -112,11 +114,13 @@ func (c *releaseCache) get(ctx context.Context, client *http.Client, force bool)
 
 // updateProgress 是推给前端的一条进度。
 type updateProgress struct {
-	Phase   selfupdate.Phase `json:"phase"`
-	Percent int              `json:"percent"` // 仅下载阶段有意义；其余为 -1
-	Message string           `json:"message"`
-	Version string           `json:"version,omitempty"`
-	Error   string           `json:"error,omitempty"`
+	Phase       selfupdate.Phase `json:"phase"`
+	Percent     int              `json:"percent"` // 仅下载阶段有意义；其余为 -1
+	Message     string           `json:"message"`
+	Version     string           `json:"version,omitempty"`
+	Error       string           `json:"error,omitempty"`
+	OperationID string           `json:"operation_id,omitempty"`
+	RequestID   string           `json:"request_id,omitempty"`
 }
 
 // updateHub 持有一次升级的进度并广播给 SSE 订阅者。
@@ -124,10 +128,16 @@ type updateProgress struct {
 // running 同时充当互斥：升级期间再次 POST /api/update/apply 直接 409，
 // 避免两个 goroutine 同时往同一个 gondar.new 写。
 type updateHub struct {
-	mu      sync.Mutex
-	running bool
-	cur     updateProgress
-	subs    map[chan updateProgress]struct{}
+	mu        sync.Mutex
+	running   bool
+	cur       updateProgress
+	subs      map[chan updateProgress]struct{}
+	operation *selfupdate.Operation
+	persist   func(selfupdate.Operation) error
+	load      func() (selfupdate.Operation, bool)
+	runtime   func() updateRuntime
+	stage     func(context.Context, *http.Client, *selfupdate.Release, string, selfupdate.Operation, selfupdate.Progress) error
+	restart   func()
 }
 
 var updHub = &updateHub{
@@ -135,28 +145,22 @@ var updHub = &updateHub{
 	subs: map[chan updateProgress]struct{}{},
 }
 
-// begin 抢占升级权限，已在进行中则返回 false。
-func (h *updateHub) begin(version string) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.running {
-		return false
-	}
-	h.running = true
-	h.cur = updateProgress{Phase: selfupdate.PhaseDownload, Percent: 0, Message: "准备中…", Version: version}
-	h.fanout(h.cur)
-	return true
-}
-
 // finish 结束一次升级。err 为 nil 表示暂存成功，等待重启。
 func (h *updateHub) finish(err error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.running = false
+	if h.operation != nil {
+		if err != nil {
+			h.operation.Phase, h.operation.Error = "failed", err.Error()
+		} else {
+			h.operation.Phase = "staged"
+		}
+	}
 	if err != nil {
-		h.cur = updateProgress{Phase: selfupdate.PhaseFailed, Percent: -1, Message: "更新失败", Error: err.Error(), Version: h.cur.Version}
+		h.cur = updateProgress{Phase: selfupdate.PhaseFailed, Percent: -1, Message: "更新失败", Error: err.Error(), Version: h.cur.Version, OperationID: h.cur.OperationID, RequestID: h.cur.RequestID}
 	} else {
-		h.cur = updateProgress{Phase: selfupdate.PhaseStaged, Percent: 100, Message: "新版本已就绪，正在重启…", Version: h.cur.Version}
+		h.cur = updateProgress{Phase: selfupdate.PhaseStaged, Percent: 100, Message: "新版本已就绪，正在重启…", Version: h.cur.Version, OperationID: h.cur.OperationID, RequestID: h.cur.RequestID}
 	}
 	h.fanout(h.cur)
 }
@@ -164,7 +168,7 @@ func (h *updateHub) finish(err error) {
 func (h *updateHub) publish(ph selfupdate.Phase, pct int, msg string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.cur = updateProgress{Phase: ph, Percent: pct, Message: msg, Version: h.cur.Version}
+	h.cur = updateProgress{Phase: ph, Percent: pct, Message: msg, Version: h.cur.Version, OperationID: h.cur.OperationID, RequestID: h.cur.RequestID}
 	h.fanout(h.cur)
 }
 
@@ -281,12 +285,35 @@ func (s *Server) updateApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, policy.Reason)
 		return
 	}
+	var req updateApplyRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "更新参数格式错误")
+		return
+	}
+	if req.RequestID != "" && (!validUpdateRequestID(req.RequestID) || req.TargetVersion == "") || req.TargetVersion != "" && !selfupdate.ValidVersionTag(req.TargetVersion) {
+		writeErr(w, http.StatusBadRequest, "更新请求标识或目标版本无效")
+		return
+	}
+	if req.RequestID != "" {
+		if previous, ok := updHub.lastOperation(); ok && previous.RequestID == req.RequestID {
+			if !sameUpdateTarget(previous, req.TargetVersion) {
+				writeErr(w, http.StatusConflict, "同一更新请求不能更改目标版本")
+			} else {
+				updateAcknowledgement(w, previous)
+			}
+			return
+		}
+	}
 
 	// 走缓存：确保装上的就是用户在界面上看到并确认的那个版本。
 	client := selfupdate.NewClient(s.maintenanceProxy())
 	rel, err := relCache.get(r.Context(), client, false)
 	if err != nil {
 		writeErr(w, 502, err.Error())
+		return
+	}
+	if req.TargetVersion != "" && strings.TrimPrefix(req.TargetVersion, "v") != strings.TrimPrefix(rel.TagName, "v") {
+		writeErr(w, http.StatusConflict, "发布目标已经变化，请重新检查版本后再更新")
 		return
 	}
 	cmp, comparable := selfupdate.CompareVersions(current, rel.TagName)
@@ -298,34 +325,24 @@ func (s *Server) updateApply(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("当前已是最新版本 %s", current))
 		return
 	}
-	if !updHub.begin(rel.TagName) {
-		writeErr(w, 409, "已有一个更新正在进行中")
+	op, start, err := updHub.beginOperation(req, rel.TagName)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, errUpdateAcceptanceStorage) {
+			status = http.StatusInternalServerError
+		}
+		writeErr(w, status, err.Error())
 		return
 	}
-
-	go func() {
-		// 刻意用 s.ctx 而不是请求的 ctx：HTTP 响应一返回请求就结束了，
-		// 挂在它上面下载会立刻被取消。
-		err := selfupdate.Stage(s.ctx, client, rel, current, func(ph selfupdate.Phase, pct int, msg string) {
-			updHub.publish(ph, pct, msg)
-		})
-		updHub.finish(err)
-		if err != nil {
-			log.Printf("[update] 更新失败：%v", err)
-			return
-		}
-		log.Printf("[update] %s → %s 已暂存，即将退出以完成换装", current, rel.TagName)
-		// 留一点时间把最后一条进度推给前端，再触发退出。
-		time.Sleep(1500 * time.Millisecond)
-		requestRestart()
-	}()
-
-	writeJSON(w, 202, map[string]any{"ok": true, "target": rel.TagName})
+	if start {
+		go updHub.stageOperation(s.ctx, client, rel, current, op)
+	}
+	updateAcknowledgement(w, op)
 }
 
 // updateRollback 主动退回上一版本（换装前备份的 gondar.old）。
 func (s *Server) updateRollback(w http.ResponseWriter, r *http.Request) {
-	if _, running := updHub.snapshot(); running {
+	if progress, running := updHub.snapshot(); running || progress.Phase == selfupdate.PhaseStaged {
 		writeErr(w, 409, "更新正在进行中，无法回滚")
 		return
 	}

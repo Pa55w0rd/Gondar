@@ -5,26 +5,34 @@ import * as React from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 
-import { ArrowLeftIcon, ArrowUpRightIcon, ChevronLeftIcon, ChevronRightIcon, FileDownIcon, ShieldAlertIcon } from "lucide-react";
-import { Spinner } from "@/components/ui/spinner";
+import {
+  ArrowLeftIcon,
+  ArrowUpRightIcon,
+  ChevronLeftIcon,
+  ChevronRightIcon,
+  FileDownIcon,
+  ShieldAlertIcon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { CopyButton } from "@/components/copy-button";
+import { EvidenceView } from "@/components/evidence-view";
+import { FindingReportSource } from "@/components/finding-report-source";
 import { FindingRetestPanel } from "@/components/finding-retest-panel";
 import { FindingTrafficPanel } from "@/components/finding-traffic-panel";
-import { EvidenceView } from "@/components/evidence-view";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { ZoomableImageDialog } from "@/components/zoomable-image-dialog";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ZoomableImageDialog } from "@/components/zoomable-image-dialog";
 import { api } from "@/lib/api";
 import { statusMeta } from "@/lib/status";
 import type { Finding, FindingStatus, Severity, TaskArtifact } from "@/lib/types";
@@ -197,10 +205,7 @@ function FindingDetailInner() {
               </Card>
               {/* 现场截图（v0.4.9）：关键照片在详情页直接可见，不用翻 Word。
                   只展示 finding_id 归属本漏洞的图片附件。 */}
-              <FindingShots
-                taskId={finding.task_id ? String(finding.task_id) : contextTaskId}
-                findingId={String(id)}
-              />
+              <FindingShots taskId={finding.task_id ? String(finding.task_id) : contextTaskId} findingId={String(id)} />
               <Card>
                 <CardHeader>
                   <CardTitle className="text-sm">证据 / PoC</CardTitle>
@@ -221,7 +226,10 @@ function FindingDetailInner() {
                 </CardHeader>
                 <CardContent>
                   <p className="mb-3 text-muted-foreground text-xs">
-                    当前证据版本：{finding.evidence_version ?? "未登记"}；报告依据版本：{finding.report_evidence_version == null || finding.report_evidence_version < 0 ? "未绑定" : finding.report_evidence_version}
+                    当前证据版本：{finding.evidence_version ?? "未登记"}；报告依据版本：
+                    {finding.report_evidence_version == null || finding.report_evidence_version < 0
+                      ? "未绑定"
+                      : finding.report_evidence_version}
                   </p>
                   {finding.report_stale ? (
                     <Alert>
@@ -229,7 +237,10 @@ function FindingDetailInner() {
                     </Alert>
                   ) : null}
                   {finding.report ? (
-                    <Markdown text={finding.report} />
+                    <>
+                      <FindingReportSource source={finding.report_source} />
+                      <Markdown text={finding.report} />
+                    </>
                   ) : (
                     <p className="text-muted-foreground text-sm">暂无详细报告。</p>
                   )}
@@ -376,7 +387,6 @@ export default function FindingDetailPage() {
   );
 }
 
-
 // FindingShots 漏洞现场截图（v0.4.9 起；v0.4.15 交互重做）：默认折叠，
 // 缩略图走服务端缩略图（原图太大，一次加载几十张会破图），悬停放大、
 // 点击弹层看细节；下载在弹层里单独给按钮。
@@ -394,7 +404,9 @@ function FindingShots({ taskId, findingId }: { taskId?: string; findingId: strin
     api
       .taskArtifacts(taskId)
       .then(setAll)
-      .catch(() => {});
+      .catch(() => {
+        /* 附件暂时不可用时保留已有列表，报告正文仍可查看。 */
+      });
   }, [taskId]);
   React.useEffect(() => {
     load();
@@ -403,16 +415,12 @@ function FindingShots({ taskId, findingId }: { taskId?: string; findingId: strin
   const isDoc = (a: TaskArtifact) =>
     ["document", "spreadsheet", "presentation", "pdf"].includes(a.kind) ||
     /\.(docx?|xlsx?|pptx?|pdf|odt|ods|odp|csv|rtf)$/i.test(a.name);
-  const own = all.filter(
-    (a) => String(a.finding_id ?? "") === findingId && (a.kind === "image" || isDoc(a)),
-  );
+  const own = all.filter((a) => String(a.finding_id ?? "") === findingId && (a.kind === "image" || isDoc(a)));
   const images = own.filter((a) => a.kind === "image");
   const docs = own.filter((a) => a.kind !== "image" && isDoc(a));
   // 本漏洞已归属但不是可视证据的附件（JSON/日志/HTML），空态时要说清楚，
   // 避免用户误以为“这个漏洞什么都没留下”。
-  const otherOwn = all.filter(
-    (a) => String(a.finding_id ?? "") === findingId && a.kind !== "image" && !isDoc(a),
-  );
+  const otherOwn = all.filter((a) => String(a.finding_id ?? "") === findingId && a.kind !== "image" && !isDoc(a));
   // 可供挑选的任务级证据（未归属的图片/文档）。
   const candidates = all.filter((a) => !a.finding_id && (a.kind === "image" || isDoc(a)));
   const thumbUrl = (id: number) => `${api.artifactUrl(taskId!, id)}?thumb=1`;
@@ -485,15 +493,18 @@ function FindingShots({ taskId, findingId }: { taskId?: string; findingId: strin
                       className="absolute top-1.5 left-1.5 z-10 size-4 accent-primary"
                       checked={checked}
                       onChange={() =>
-                        setPickSelected((cur) =>
-                          cur.includes(a.id) ? cur.filter((x) => x !== a.id) : [...cur, a.id],
-                        )
+                        setPickSelected((cur) => (cur.includes(a.id) ? cur.filter((x) => x !== a.id) : [...cur, a.id]))
                       }
                     />
                     <span className="flex aspect-[4/3] items-center justify-center bg-muted/40">
                       {a.kind === "image" ? (
                         // eslint-disable-next-line @next/next/no-img-element
-                        <img src={thumbUrl(a.id)} alt={a.note || a.name} loading="lazy" className="h-full w-full object-cover" />
+                        <img
+                          src={thumbUrl(a.id)}
+                          alt={a.note || a.name}
+                          loading="lazy"
+                          className="h-full w-full object-cover"
+                        />
                       ) : a.preview_state === "ready" ? (
                         // eslint-disable-next-line @next/next/no-img-element
                         <img
@@ -674,19 +685,48 @@ function FindingShots({ taskId, findingId }: { taskId?: string; findingId: strin
           </CardContent>
         )}
       </Card>
-      {preview && <ZoomableImageDialog open onClose={() => setPreview(null)} src={fullUrl(preview.id)}
-        title={preview.note || preview.name} description={preview.name} downloadUrl={downloadUrl(preview.id)} />}
-      {docPreview && <ZoomableImageDialog open onClose={() => setDocPreview(null)}
-        src={previewUrl(docPreview.artifact.id, docPreview.page)} title={docPreview.artifact.note || docPreview.artifact.name}
-        description={`${docPreview.artifact.name} · 第 ${docPreview.page} / ${docPreview.artifact.preview_pages ?? 0} 页`}
-        downloadUrl={downloadUrl(docPreview.artifact.id)} footer={
-          <div className="flex items-center justify-end gap-2">
-            <Button size="sm" variant="outline" disabled={docPreview.page <= 1}
-              onClick={() => setDocPreview((cur) => cur ? { ...cur, page: cur.page - 1 } : cur)}><ChevronLeftIcon className="size-3.5" />上一页</Button>
-            <Button size="sm" variant="outline" disabled={docPreview.page >= (docPreview.artifact.preview_pages ?? 1)}
-              onClick={() => setDocPreview((cur) => cur ? { ...cur, page: cur.page + 1 } : cur)}>下一页<ChevronRightIcon className="size-3.5" /></Button>
-          </div>
-        } />}
+      {preview && (
+        <ZoomableImageDialog
+          open
+          onClose={() => setPreview(null)}
+          src={fullUrl(preview.id)}
+          title={preview.note || preview.name}
+          description={preview.name}
+          downloadUrl={downloadUrl(preview.id)}
+        />
+      )}
+      {docPreview && (
+        <ZoomableImageDialog
+          open
+          onClose={() => setDocPreview(null)}
+          src={previewUrl(docPreview.artifact.id, docPreview.page)}
+          title={docPreview.artifact.note || docPreview.artifact.name}
+          description={`${docPreview.artifact.name} · 第 ${docPreview.page} / ${docPreview.artifact.preview_pages ?? 0} 页`}
+          downloadUrl={downloadUrl(docPreview.artifact.id)}
+          footer={
+            <div className="flex items-center justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={docPreview.page <= 1}
+                onClick={() => setDocPreview((cur) => (cur ? { ...cur, page: cur.page - 1 } : cur))}
+              >
+                <ChevronLeftIcon className="size-3.5" />
+                上一页
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={docPreview.page >= (docPreview.artifact.preview_pages ?? 1)}
+                onClick={() => setDocPreview((cur) => (cur ? { ...cur, page: cur.page + 1 } : cur))}
+              >
+                下一页
+                <ChevronRightIcon className="size-3.5" />
+              </Button>
+            </div>
+          }
+        />
+      )}
       {pickerDialog}
     </>
   );

@@ -96,6 +96,9 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	case s.engine.isSettling(t.ID):
 		writeErr(w, http.StatusConflict, "任务正在收尾，无法向 Worker 发送消息")
 		return
+	case s.engine.executionStoragePending(t.ID):
+		writeErr(w, http.StatusConflict, "任务正在保存执行结果，请等待存储恢复后再发送消息")
+		return
 	}
 
 	node, err := t.Store.GetNode(iid)

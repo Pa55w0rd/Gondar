@@ -546,6 +546,10 @@ ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued BOOLEAN NOT NULL DEFAULT false
 -- 给 agent 开放 add_task_scope/list_untested_assets;false=全部关闭(见 task_scope.go)。
 -- 存量任务默认 true 保持原行为;company 关联(task_scope kind=company)不受此开关影响。
 ALTER TABLE tasks ADD COLUMN IF NOT EXISTS coverage_enabled BOOLEAN NOT NULL DEFAULT true;
+-- Compatibility default preserves declared-scope sharing. The narrower mode
+-- only selects source material; it never replaces the declared scope predicate.
+ALTER TABLE tasks ADD COLUMN IF NOT EXISTS asset_context_mode TEXT NOT NULL DEFAULT 'declared_scope'
+    CHECK (asset_context_mode IN ('declared_scope','task_sources'));
 -- queued_at makes admission FIFO reflect the actual enqueue order rather than the
 -- task creation order. queue_mode distinguishes first bootstrap from resuming an
 -- exploration that already owns goals/history.
@@ -997,12 +1001,14 @@ CREATE TABLE IF NOT EXISTS conversation_activities (
     is_error           BOOLEAN NOT NULL DEFAULT false,
     summary            TEXT,
     detail             TEXT,
+    metadata           JSONB NOT NULL DEFAULT '{}',
     input_tokens       INTEGER,
     output_tokens      INTEGER,
     cache_read_tokens  INTEGER,
     cache_write_tokens INTEGER,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversation_activities ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_conv_act ON conversation_activities(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_conv_act_tool_call ON conversation_activities(conversation_id, tool_use_id, id)
   WHERE kind IN ('tool_use', 'tool_result');
@@ -1171,6 +1177,7 @@ CREATE TRIGGER trg_conversation_retest_delete BEFORE DELETE ON conversations
 
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS evidence_version BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_evidence_version BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE findings ADD COLUMN IF NOT EXISTS report_source JSONB;
 ALTER TABLE findings ADD COLUMN IF NOT EXISTS artifact_evidence_version BIGINT NOT NULL DEFAULT 0;
 
 -- Report delivery retries belong to the finding, so archive SELECT * retains

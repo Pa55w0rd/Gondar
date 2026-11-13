@@ -45,6 +45,17 @@ type Progress func(ph Phase, pct int, msg string)
 //
 // 函数返回即代表暂存完成，调用方随后优雅关闭并以 ExitRestart 退出。
 func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion string, prog Progress) error {
+	return stageRelease(ctx, c, rel, currentVersion, nil, prog)
+}
+
+func StageWithOperation(ctx context.Context, c *http.Client, rel *Release, currentVersion string, operation Operation, prog Progress) error {
+	return stageRelease(ctx, c, rel, currentVersion, &operation, prog)
+}
+
+func stageRelease(ctx context.Context, c *http.Client, rel *Release, currentVersion string, operation *Operation, prog Progress) error {
+	if operation != nil && (operation.ID == "" || operation.RequestID == "" || operation.Repository != Repo || operation.TargetVersion != strings.TrimPrefix(rel.TagName, "v") || operation.Asset != AssetName(rel.TagName, runtime.GOOS, runtime.GOARCH)) {
+		return fmt.Errorf("更新受理身份与发行目标不一致")
+	}
 	if prog == nil {
 		prog = func(Phase, int, string) {}
 	}
@@ -90,11 +101,23 @@ func Stage(ctx context.Context, c *http.Client, rel *Release, currentVersion str
 		return fmt.Errorf("暂存新版本: %w", err)
 	}
 
+	if operation != nil {
+		operation.BinarySHA256, operation.Phase = binSum, "staged"
+		if err := saveOperation(p, *operation); err != nil {
+			cleanStaged(p)
+			return fmt.Errorf("保存更新受理身份失败: %w", err)
+		}
+	}
 	if err := writeMarker(p.Marker, marker{
-		From:     currentVersion,
-		To:       strings.TrimPrefix(rel.TagName, "v"),
-		StagedAt: time.Now().Unix(),
+		From:      currentVersion,
+		To:        strings.TrimPrefix(rel.TagName, "v"),
+		StagedAt:  time.Now().Unix(),
+		Operation: operation,
 	}); err != nil {
+		if operation != nil {
+			cleanStaged(p)
+			return fmt.Errorf("保存升级恢复标记失败: %w", err)
+		}
 		// 标记只影响自动回滚能力，暂存件本身已就位，不因此中断升级。
 		prog(PhaseStaged, -1, "警告：写入升级标记失败，本次升级将没有自动回滚保护")
 	}

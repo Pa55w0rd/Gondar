@@ -8,7 +8,7 @@
 #   GONDAR_TARGET_OS=linux             One target OS in single-target mode.
 #   GONDAR_TARGET_ARCH=amd64           One target arch in single-target mode.
 #   GONDAR_TARGETS=linux/amd64,...     Comma-separated targets for multi-target mode.
-#   GONDAR_BUILD_VERSION=v0.3.3        Version embedded in the binary and archive name.
+#   GONDAR_BUILD_VERSION=v0.4.0        Version embedded in the binary and archive name.
 #   GONDAR_RELEASE_REPO=owner/repo    Release source (defaults to Pa55w0rd/Gondar; set empty to disable).
 #   GONDAR_RELEASE_PUBLIC_KEY=BASE64 Trusted Ed25519 public key (defaults to deployment/release-public-key.txt).
 #   GONDAR_OUTPUT=/path/to/gondar       Explicit binary path in single-target mode.
@@ -103,7 +103,7 @@ if [ -z "${GONDAR_BUILD_VERSION:-}" ]; then
     GONDAR_BUILD_VERSION="dev"
   fi
 fi
-# Release tags are commonly passed as v0.3.3; keep the binary version consistent.
+# Release tags are commonly passed as v0.4.0; keep the binary version consistent.
 GONDAR_BUILD_VERSION="${GONDAR_BUILD_VERSION#v}"
 GONDAR_OUTPUT_DIR="${GONDAR_OUTPUT_DIR:-dist}"
 GONDAR_PACKAGE_DIR="${GONDAR_PACKAGE_DIR:-$GONDAR_OUTPUT_DIR}"
@@ -202,6 +202,10 @@ package_binary() {
   cp third_party/go-mitmproxy/LICENSE third_party/go-mitmproxy/GONDAR_CHANGES.md "$package_root/third_party/go-mitmproxy/"
   mkdir -p "$package_root/third_party/shadcn-tailwind"
   cp third_party/shadcn-tailwind/LICENSE "$package_root/third_party/shadcn-tailwind/"
+  mkdir -p "$package_root/third_party/norma"
+  cp third_party/norma/LICENSE third_party/norma/GONDAR_NOTICE.md third_party/norma/UPSTREAM_FILES.json "$package_root/third_party/norma/"
+  mkdir -p "$package_root/docs"
+  cp docs/0.4.0-changes.md docs/独立检索与任务资料.md "$package_root/docs/"
   if [ -f README.md ]; then cp README.md "$package_root/"; fi
   for notice in LICENSE NOTICE.md; do
     if [ -f "$notice" ]; then cp "$notice" "$package_root/"; fi

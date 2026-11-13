@@ -80,6 +80,53 @@ func (s *Server) listCompanies(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
+	query := r.URL.Query()
+	if raw := query.Get("names_only"); raw != "" {
+		namesOnly, err := strconv.ParseBool(raw)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "names_only 必须是布尔值")
+			return
+		}
+		if namesOnly {
+			if query.Has("page") || query.Has("page_size") {
+				writeErr(w, http.StatusBadRequest, "名称轻接口不接受分页参数")
+				return
+			}
+			names, err := cs.ListCompanyNames(r.Context(), query.Get("q"))
+			if err != nil {
+				writeErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, names)
+			return
+		}
+	}
+	// Explicit pagination is opt-in. Legacy callers (notably task creation)
+	// retain every company and its full scope when no page parameters are sent.
+	if query.Has("page") || query.Has("page_size") {
+		page, size := 1, 20
+		for key, target := range map[string]*int{"page": &page, "page_size": &size} {
+			if query.Has(key) {
+				value, err := strconv.Atoi(query.Get(key))
+				if err != nil || value < 1 || (key == "page_size" && value > 200) {
+					writeErr(w, http.StatusBadRequest, "非法企业分页参数")
+					return
+				}
+				*target = value
+			}
+		}
+		if page-1 > int(^uint(0)>>1)/size {
+			writeErr(w, http.StatusBadRequest, "企业分页偏移过大")
+			return
+		}
+		result, err := cs.ListCompaniesPage(r.Context(), query.Get("q"), page, size)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
 	companies, err := cs.ListCompanies()
 	if err != nil {
 		writeErr(w, 500, err.Error())
@@ -340,8 +387,36 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	// total is the full match count ignoring limit/offset. Count first so an offset
 	// beyond the last row can return an empty page without an expensive scan.
 	total := 0
+	taskID, _ := strconv.ParseInt(q.Get("task_id"), 10, 64)
+	narrow := false
+	if taskID > 0 {
+		mode, modeErr := as.TaskAssetContextMode(taskID)
+		if modeErr != nil {
+			writeErr(w, http.StatusNotFound, "task not found")
+			return
+		}
+		narrow = mode == db.AssetContextTaskSources
+	}
 
-	if dsl := q.Get("dsl"); dsl != "" {
+	if narrow {
+		dsl := q.Get("dsl")
+		if companyID, _ := strconv.ParseInt(q.Get("company_id"), 10, 64); companyID > 0 {
+			company := fmt.Sprintf("company_id=%d", companyID)
+			if strings.TrimSpace(dsl) == "" {
+				dsl = company
+			} else {
+				dsl = "(" + dsl + ") AND " + company
+			}
+		}
+		if err := db.ValidateDSL(dsl); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		total, err = as.CountDSLInScope(dsl, typ, taskID)
+		if err == nil && offset < total {
+			assets, err = as.QueryDSLInScope(dsl, typ, taskID, limit, offset)
+		}
+	} else if dsl := q.Get("dsl"); dsl != "" {
 		if err := db.ValidateDSL(dsl); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -402,7 +477,16 @@ func (s *Server) assetCounts(w http.ResponseWriter, r *http.Request) {
 	var counts map[string]int
 	var err error
 	if taskID, _ := strconv.ParseInt(r.URL.Query().Get("task_id"), 10, 64); taskID > 0 {
-		counts, err = as.CountsByTypeForTask(taskID)
+		mode, modeErr := as.TaskAssetContextMode(taskID)
+		if modeErr != nil {
+			writeErr(w, http.StatusNotFound, "task not found")
+			return
+		}
+		if mode == db.AssetContextTaskSources {
+			counts, err = as.CountsByTypeInScope(taskID)
+		} else {
+			counts, err = as.CountsByTypeForTask(taskID)
+		}
 	} else {
 		counts, err = as.CountsByType()
 	}

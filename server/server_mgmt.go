@@ -206,7 +206,7 @@ func (s *Server) waitTaskQuiescent(ctx context.Context, taskID string) error {
 		s.chatMu.Lock()
 		chatBusy := s.chatBusy[taskID]
 		s.chatMu.Unlock()
-		if s.engine.inflightCount(taskID) == 0 && !chatBusy {
+		if s.engine.inflightCount(taskID) == 0 && s.engine.taskFileReadCount(taskID) == 0 && !chatBusy {
 			return nil
 		}
 		select {

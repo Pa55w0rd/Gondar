@@ -22,3 +22,7 @@
 !third_party/go-mitmproxy/LICENSE
 !third_party/shadcn-tailwind/
 !third_party/shadcn-tailwind/LICENSE
+!third_party/norma/
+!third_party/norma/LICENSE
+!third_party/norma/GONDAR_NOTICE.md
+!third_party/norma/UPSTREAM_FILES.json

@@ -24,6 +24,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Autumn-27/norma/toolcall"
+
 	"gondar/db"
 )
 
@@ -757,7 +759,30 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 // pending record is still created (conversation_id = NULL) so the approvals
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
-func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) (allowed bool) {
+	var recordedID int64
+	defer func() {
+		if allowed {
+			return
+		}
+		if ctx.Err() != nil {
+			toolcall.Mark(ctx, toolcall.Cancelled, toolcall.NotExecuted, "policy", "cancelled_before_execution", dec.RuleID)
+			return
+		}
+		if recordedID > 0 && i != nil && i.db != nil {
+			if saved, err := i.db.GetInterceptDetail(recordedID); err == nil && saved != nil {
+				switch saved.Status {
+				case "timeout":
+					toolcall.Mark(ctx, toolcall.ApprovalTimeout, toolcall.NotExecuted, "policy", "approval_timeout", dec.RuleID)
+					return
+				case "denied":
+					toolcall.Mark(ctx, toolcall.ApprovalRejected, toolcall.NotExecuted, "policy", "approval_rejected", dec.RuleID)
+					return
+				}
+			}
+		}
+		toolcall.Mark(ctx, toolcall.HookPrevented, toolcall.NotExecuted, "policy", "approval_state_unavailable", dec.RuleID)
+	}()
 	// nil db（server 尚未接上数据库时）：没法建审批记录，也就没法等人批。
 	// 此时按「拒绝」处理——不能因为没人能批就默认放行。
 	if i == nil || i.db == nil {
@@ -772,6 +797,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	if err != nil {
 		return false
 	}
+	recordedID = pendingID
 
 	i.bindResult(ctx, pendingID, audit)
 	ch := i.pending.add(pendingID)
@@ -833,7 +859,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 			return allowed
 		case <-ctx.Done():
 			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
-			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
+			_ = i.completeRecordedResult(pendingID, audit, "not_executed", "执行前工作已取消", false)
 			return false
 		}
 	}
@@ -864,7 +890,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		return allowed
 	case <-ctx.Done():
 		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
-		_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
+		_ = i.completeRecordedResult(pendingID, audit, "not_executed", "执行前工作已取消", false)
 		return false
 	}
 }

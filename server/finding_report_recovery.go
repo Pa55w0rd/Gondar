@@ -323,7 +323,7 @@ func (s *Server) runFindingReportRecovery(parent context.Context, job *db.Findin
 		if called {
 			cleanup, done := context.WithTimeout(context.Background(), 5*time.Second)
 			defer done()
-			metadata, _ := json.Marshal(map[string]any{"finding_id": job.FindingID, "finding_node_id": job.NodeID, "report_recovery_attempt": job.Attempt, "terminal_reason": reason})
+			metadata, _ := json.Marshal(map[string]any{"finding_id": job.FindingID, "finding_node_id": job.NodeID, "report_recovery_attempt": job.Attempt, "report_recovery_id":db.FindingReportRecoverySourceID(job), "terminal_reason": reason})
 			if err := s.m.pg.AppendFindingReportRecoveryResult(cleanup, job, db.Activity{
 				IsError: !saved, Summary: fmt.Sprintf("报告补写 #%d：%s（第%d次）", job.FindingID, reason, job.Attempt), Metadata: metadata,
 				InputTokens: &usage.InputTokens, OutputTokens: &usage.OutputTokens, CacheReadTokens: &usage.CacheReadTokens, CacheWriteTokens: &usage.CacheWriteTokens,

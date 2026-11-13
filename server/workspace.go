@@ -426,18 +426,3 @@ func saveWorkspaceUpload(hdr *multipart.FileHeader, target *workspaceTarget) err
 	defer src.Close()
 	return target.write(src)
 }
-
-func saveUpload(hdr *multipart.FileHeader, dest string) error {
-	src, err := hdr.Open()
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-	out, err := os.Create(dest)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	_, err = io.Copy(out, src)
-	return err
-}

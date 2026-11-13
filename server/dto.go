@@ -62,6 +62,7 @@ type TaskDTO struct {
 	CompanyIDs         []int64            `json:"company_ids"`
 	CoverageEnabled    bool               `json:"coverage_enabled"` // 资产覆盖度功能开关(创建时定)
 	CompletionMode     string             `json:"completion_mode"`
+	AssetContextMode   string             `json:"asset_context_mode"`
 	TimeoutSeconds     int                `json:"timeout_seconds"`
 	PlannerWait        json.RawMessage    `json:"planner_wait,omitempty"`
 }
@@ -142,7 +143,8 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CompanyIDs:         lifecycle.CompanyIDs,
 		CoverageEnabled:    t.CoverageEnabled,
 		CompletionMode:     lifecycle.CompletionMode, TimeoutSeconds: lifecycle.TimeoutSeconds,
-		PlannerWait: plannerWait,
+		AssetContextMode: lifecycle.AssetContextMode,
+		PlannerWait:      plannerWait,
 	}
 }
 
@@ -328,6 +330,7 @@ func coverageAssetRefDTO(ref db.AssetRef) CoverageAssetRefDTO {
 // ---- Finding (frontend "Finding") ----
 
 type FindingDTO struct {
+	ReportSource          *db.FindingReportSource    `json:"report_source,omitempty"`
 	TrafficCount          int                        `json:"traffic_count"`
 	EvidenceVersion       int64                      `json:"evidence_version"`
 	ReportEvidenceVersion int64                      `json:"report_evidence_version"`
@@ -470,6 +473,7 @@ func findingFromDB(f *db.DBFinding, assets map[int64]*db.Asset) FindingDTO {
 	}
 	d := FindingDTO{
 		ID:           i64s(f.ID),
+		ReportSource: f.ReportSource,
 		FindingID:    i64s(f.ID),
 		TrafficCount: f.TrafficCount, EvidenceVersion: f.EvidenceVersion, ReportEvidenceVersion: f.ReportEvidenceVersion,
 		ReportStale: f.Report != "" && f.EvidenceVersion != f.ReportEvidenceVersion, TrafficBindings: f.TrafficBindings,

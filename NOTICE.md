@@ -31,6 +31,7 @@ Gondar 从 ARTEX 开源代码二次开发而来，原始公开代码主要作者
 
 ## 保留的第三方代码与资源
 
+- Norma v0.4.4，Apache-2.0；固定源码副本及原始逐文件摘要保留在 [third_party/norma](third_party/norma/)。本地维护改动见 [GONDAR_NOTICE.md](third_party/norma/GONDAR_NOTICE.md)，完整许可随源码、发行包与镜像提供，见 [LICENSE](third_party/norma/LICENSE)。
 - [go-mitmproxy v1.9.2](https://github.com/lqqyt2423/go-mitmproxy)，作者 liqiang，MIT；来源提交 `5ae87ab47229f17f7e3b7e619b28236bb56a9114`。本地副本与修改见 [GONDAR_CHANGES.md](third_party/go-mitmproxy/GONDAR_CHANGES.md)，完整版权与许可见[第三方LICENSE](third_party/go-mitmproxy/LICENSE)。
 - [shadcn/ui](https://github.com/shadcn-ui/ui)，作者 shadcn，MIT；保留 shadcn 4.12.0 的完整Tailwind样式文件，固定提交 `8055a12f462788f008bf5d746c9c6a585f552b29`。[来源与完整性记录](web/src/styles/vendor/shadcn-tailwind.source.json)、[原始许可](third_party/shadcn-tailwind/LICENSE)均随源码提供。
 - 其他依赖版本见 [go.mod](go.mod)、[go.sum](go.sum)、[package.json](web/package.json)及[前端依赖锁](web/package-lock.json)。依赖、字体与其他非代码资源的原有权利归属不因仓库整体使用AGPL而改变。

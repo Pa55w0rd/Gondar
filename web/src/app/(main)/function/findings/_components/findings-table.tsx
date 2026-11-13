@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 
 import { CopyButton } from "@/components/copy-button";
+import { FindingReportSource } from "@/components/finding-report-source";
 import { Markdown } from "@/components/markdown";
 import { StatusBadge } from "@/components/status-badge";
 import {
@@ -63,7 +64,7 @@ export interface FindingEdit {
   severity: Severity;
 }
 
-export type FindingReport = { status: "loading" | "done" | "error"; text: string };
+export type FindingReport = { status: "loading" | "done" | "error"; text: string; source?: Finding["report_source"] };
 
 // Exploration node ids are only unique inside a task. Prefer the persisted
 // finding id and otherwise namespace the node id by task so editing one group
@@ -274,7 +275,9 @@ export function FindingsTable({
                     <span className="text-muted-foreground">—</span>
                   )}
                 </TableCell>
-                <TableCell className="hidden text-muted-foreground text-xs tabular-nums md:table-cell">{fmtTime(f.ts)}</TableCell>
+                <TableCell className="hidden text-muted-foreground text-xs tabular-nums md:table-cell">
+                  {fmtTime(f.ts)}
+                </TableCell>
                 <TableCell className="hidden md:table-cell" onClick={(e) => e.stopPropagation()}>
                   <div className="flex items-center gap-1">
                     {retest ? (
@@ -433,6 +436,7 @@ export function FindingsTable({
                               // whitespace-pre-wrap 让代码块也换行——否则长代码行/长 URL
                               // 会撑宽 colSpan 单元格,把整张表挤出横向滚动条。
                               <div className="min-w-0 break-words rounded-md border bg-background px-3 py-2 [&_pre]:whitespace-pre-wrap">
+                                <FindingReportSource source={rep.source} />
                                 <Markdown text={rep.text} />
                               </div>
                             );

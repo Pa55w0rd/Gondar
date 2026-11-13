@@ -49,8 +49,9 @@ type Task struct {
 	// 覆盖度、不自动累积 task_scope(source=auto)、不给 agent 开放 add_task_scope/
 	// list_untested_assets、态势里不注入 coverage 块(scope 字段仍保留)。company 关联
 	// (task_scope kind=company)与此开关无关，永不受影响。见 db/task_scope.go。
-	CoverageEnabled bool   `json:"coverage_enabled"`
-	CompletionMode  string `json:"completion_mode"`
+	CoverageEnabled  bool   `json:"coverage_enabled"`
+	CompletionMode   string `json:"completion_mode"`
+	AssetContextMode string `json:"asset_context_mode"`
 	// AuthConfig 是任务级目标登录凭据（v0.4.8）；Password/TOTPSecret 不参与
 	// JSON 序列化，API 只回传 has_password/has_totp 派生标记。
 	AuthConfig *TaskAuthConfig `json:"auth_config,omitempty"`
@@ -155,6 +156,7 @@ type TaskCreateOptions struct {
 	LLMProfileIDs        []int64
 	TimeoutSeconds       int
 	CompletionMode       string
+	AssetContextMode     string
 	PlanHeartbeatSeconds int
 	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
 	// 路径(编排 spawn、老 API)沿用原行为。仅 web 创建任务时可显式传 false 关闭。
@@ -192,6 +194,10 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 // admission in one PostgreSQL transaction. Callers validate option limits first.
 func (d *DB) createTaskWithOptionsTx(tx *sql.Tx, description, goal string, opts TaskCreateOptions) (*Task, error) {
 	mode, err := NormalizeCompletionMode(opts.CompletionMode)
+	if err != nil {
+		return nil, err
+	}
+	assetMode, err := NormalizeAssetContextMode(opts.AssetContextMode)
 	if err != nil {
 		return nil, err
 	}
@@ -244,8 +250,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		SourceTaskIDs:  append([]int64(nil), opts.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), opts.CompanyIDs...),
 		TimeoutSeconds: opts.TimeoutSeconds, PlanHeartbeatSeconds: opts.PlanHeartbeatSeconds,
-		CoverageEnabled: coverageEnabled,
-		CompletionMode:  mode,
+		CoverageEnabled:  coverageEnabled,
+		CompletionMode:   mode,
+		AssetContextMode: assetMode,
 	}
 	var authJSON any
 	if opts.AuthConfig != nil {
@@ -254,9 +261,9 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		}
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, auth_config,completion_mode)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11)
-RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, authJSON, mode).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
+INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, auth_config,completion_mode,asset_context_mode)
+VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,$10,$11,$12)
+RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, authJSON, mode, assetMode).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
 	if err := insertTaskRelations(tx, t.ID, opts.SourceTaskIDs); err != nil {
@@ -372,12 +379,12 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at, COALESCE(auth_config::text,'null'),completion_mode`
+description, goal, exploration_id, status, paused, queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), first_run_at, deadline_at, COALESCE(auth_config::text,'null'),completion_mode,asset_context_mode`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
 	var authRaw string
-	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt, &authRaw, &t.CompletionMode); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.FirstRunAt, &t.DeadlineAt, &authRaw, &t.CompletionMode, &t.AssetContextMode); err != nil {
 		return nil, err
 	}
 	t.AuthConfig = ParseTaskAuth([]byte(authRaw))
@@ -420,22 +427,31 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 
 // TaskPatch updates task list metadata without changing execution state.
 type TaskPatch struct {
-	Name   *string
-	Pinned *bool
+	Name             *string
+	Pinned           *bool
+	AssetContextMode *string
 }
 
 // UpdateTask applies a partial task name/pin mutation and returns the updated row.
 // Re-pinning an already pinned task preserves its original position.
 func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
+	if patch.AssetContextMode != nil {
+		mode, err := NormalizeAssetContextMode(*patch.AssetContextMode)
+		if err != nil {
+			return nil, err
+		}
+		patch.AssetContextMode = &mode
+	}
 	task, err := scanTask(d.QueryRow(`UPDATE tasks SET
 	name = CASE WHEN $2::boolean THEN $3 ELSE name END,
+	asset_context_mode = COALESCE($5::text, asset_context_mode),
 	pinned_at = CASE
 		WHEN $4::boolean IS NULL THEN pinned_at
 		WHEN $4::boolean THEN COALESCE(pinned_at, now())
 		ELSE NULL
 	END
 WHERE id=$1 AND deleted_at IS NULL
-RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned))
+RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.AssetContextMode))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

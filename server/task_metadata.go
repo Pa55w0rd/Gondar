@@ -25,8 +25,9 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxTaskMetadataRequestSize)
 	var request struct {
-		Name   *string `json:"name"`
-		Pinned *bool   `json:"pinned"`
+		Name             *string `json:"name"`
+		Pinned           *bool   `json:"pinned"`
+		AssetContextMode *string `json:"asset_context_mode"`
 	}
 	if err := decode(r, &request); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -37,9 +38,17 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	if request.Name == nil && request.Pinned == nil {
-		writeErr(w, http.StatusBadRequest, "至少需要提供 name 或 pinned")
+	if request.Name == nil && request.Pinned == nil && request.AssetContextMode == nil {
+		writeErr(w, http.StatusBadRequest, "至少需要提供 name、pinned 或 asset_context_mode")
 		return
+	}
+	if request.AssetContextMode != nil {
+		mode, err := db.NormalizeAssetContextMode(*request.AssetContextMode)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		request.AssetContextMode = &mode
 	}
 	if request.Name != nil {
 		name := strings.TrimSpace(*request.Name)
@@ -53,7 +62,7 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 		request.Name = &name
 	}
-	task, err := s.m.UpdateTaskMetadata(taskID, db.TaskPatch{Name: request.Name, Pinned: request.Pinned})
+	task, err := s.m.UpdateTaskMetadata(taskID, db.TaskPatch{Name: request.Name, Pinned: request.Pinned, AssetContextMode: request.AssetContextMode})
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -61,6 +70,9 @@ func (s *Server) updateTaskMetadata(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
+	}
+	if request.AssetContextMode != nil {
+		task.Notify()
 	}
 	writeJSON(w, http.StatusOK, taskDTO(task, s.resolvedTaskStatus(task)))
 }

@@ -325,7 +325,7 @@ func (s *Server) restoreTaskRuntimes() {
 		// clear stale 'running' intents from a prior crash/restart (no live worker
 		// owns them) so they re-claim instead of spinning forever in the UI.
 		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
-			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
+			log.Printf("[engine] task %s 恢复或隔离 %d 个残留 running 意图", t.ID, n)
 		}
 		if lifecycle.Paused {
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
@@ -716,6 +716,7 @@ func (s *Server) chatAgentRef() *agent.ChatAgent {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerSideRoutes(mux)
+	s.registerTaskFileRoutes(mux)
 
 	// Auth routes — exempt from JWT check (handled in requireAuth)
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
@@ -735,6 +736,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/update/apply", s.updateApply)
 	mux.HandleFunc("POST /api/update/rollback", s.updateRollback)
 	mux.HandleFunc("GET /api/update/stream", s.updateStream)
+	mux.HandleFunc("GET /api/update/status", s.updateStatus)
 
 	mux.HandleFunc("GET /api/tasks", s.listTasks)
 	mux.HandleFunc("POST /api/tasks", s.createTask)
@@ -1491,58 +1493,26 @@ func (s *Server) setLLM(w http.ResponseWriter, r *http.Request) {
 
 // testLLM makes a real minimal completion to verify the config works.
 func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Provider         string `json:"provider"`
-		Model            string `json:"model"`
-		BaseURL          string `json:"base_url"`
-		Proxy            string `json:"proxy"`
-		APIKey           string `json:"api_key"`
-		ThinkingType     string `json:"thinking_type"`
-		ReasoningEffort  string `json:"reasoning_effort"`
-		ProfileID        *int64 `json:"profile_id"`         // 测已存 profile 时传入：api_key 为空则用它存的 key
-		Streaming        *bool  `json:"streaming"`          // 省略=流式，与保存 profile 时同一套默认
-		SessionHeaderKey string `json:"session_header_key"` // 非空=测试时也带该自定义会话头，值为一次性随机 session id
-	}
+	var req llmTestRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, err.Error())
+		writeErr(w, 400, "模型测试参数格式错误")
 		return
 	}
-	cfg := agent.ConfigFrom(req.Provider, req.Model, req.BaseURL, req.APIKey, req.Proxy)
-	// mirror production: send the SAME thinking params so a provider that rejects the
-	// reasoning_effort/thinking field fails the test too (no false "test ok, run 400").
-	cfg.ThinkingType = req.ThinkingType
-	cfg.ReasoningEffort = req.ReasoningEffort
-	// 同理，收发模式也照该 profile 的选择来：只支持其中一种通道的端点必须在这里就
-	// 暴露，而不是等会话里才发现"测试通过的配置根本跑不动"。
-	if req.Streaming != nil {
-		cfg.Stream = *req.Streaming
-	}
-	// 自定义会话头名照该配置来：非空则测试请求也发这个头(值为一次性随机 session id，
-	// 见 TestConnection)。opencode zen 等强制要求 x-opencode-session 的端点，缺了它
-	// 直接 400，必须在测试路径上也带上，否则"对话通、测试 400"。
-	cfg.SessionHeaderKey = req.SessionHeaderKey
-	// API Key 解析优先级：表单输入 > 指定 profile 存的 key > 全局配置的 key。
-	// 已存 profile 的 key 不回传浏览器，所以测试已存配置时表单为空，需从 DB 取。
-	// 会话头名同理：表单未带时用已存 profile 的值兜底。
-	if req.ProfileID != nil {
-		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
-			cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
-			cfg.MaxConcurrent, cfg.LimitOwnerID = p.MaxConcurrent, p.ID
-			if cfg.APIKey == "" {
-				cfg.APIKey = p.APIKey
-			}
-			if cfg.SessionHeaderKey == "" {
-				cfg.SessionHeaderKey = p.SessionHeaderKey
-			}
+	s.cfgMu.Lock()
+	fallbackKey := s.llmCfg.APIKey
+	s.cfgMu.Unlock()
+	cfg, status, err := resolveLLMTestConfig(req, func(id int64) (*db.LLMProfile, error) {
+		if s.m == nil || s.m.pg == nil {
+			return nil, errors.New("model configuration store unavailable")
 		}
-	}
-	if cfg.APIKey == "" {
-		s.cfgMu.Lock()
-		cfg.APIKey = s.llmCfg.APIKey
-		s.cfgMu.Unlock()
-	}
-	if cfg.APIKey == "" {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "未提供 API Key"})
+		return s.m.pg.ProfileByID(id)
+	}, fallbackKey)
+	if err != nil {
+		if status != http.StatusOK {
+			writeErr(w, status, err.Error())
+		} else {
+			writeJSON(w, status, map[string]any{"ok": false, "error": llmTestDiagnostic(err.Error(), cfg)})
+		}
 		return
 	}
 	// 重试参数【不】带进连接测试:测试有 30s 硬超时,把配置的重试次数/长间隔叠上去
@@ -1550,12 +1520,12 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 	// 是跑起来之后的事。
 	lat, reply, err := agent.TestConnection(r.Context(), cfg)
 	if err != nil {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		writeJSON(w, 200, map[string]any{"ok": false, "error": llmTestDiagnostic(err.Error(), cfg)})
 		return
 	}
 	// 回传模型实际回复，让"测试通过"有据可查：看得见它确实说了话，而不只是 HTTP 200。
 	writeJSON(w, 200, map[string]any{
-		"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model, "reply": truncateReply(reply),
+		"ok": true, "latency_ms": lat.Milliseconds(), "model": cfg.Model, "reply": truncateReply(llmTestDiagnostic(reply, cfg)),
 	})
 }
 
@@ -1585,6 +1555,7 @@ type createTaskReq struct {
 	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
 	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
 	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	AssetContextMode     string   `json:"asset_context_mode,omitempty"`
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 	// AuthConfig 任务级目标登录凭据（v0.4.8）：worker 先登录再测；创建后可用
@@ -1617,6 +1588,12 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.CompletionMode = mode
+	assetMode, assetModeErr := db.NormalizeAssetContextMode(req.AssetContextMode)
+	if assetModeErr != nil {
+		writeErr(w, http.StatusBadRequest, assetModeErr.Error())
+		return
+	}
+	req.AssetContextMode = assetMode
 	if len(req.SourceTaskIDs) > db.MaxTaskSourceCount {
 		writeErr(w, 400, fmt.Sprintf("关联任务最多选择 %d 个", db.MaxTaskSourceCount))
 		return
@@ -1657,10 +1634,11 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
-		CompletionMode:  req.CompletionMode,
-		CoverageEnabled: req.CoverageEnabled,
-		InterceptRules:  interceptRules,
-		AuthConfig:      req.AuthConfig,
+		CompletionMode:   req.CompletionMode,
+		CoverageEnabled:  req.CoverageEnabled,
+		AssetContextMode: req.AssetContextMode,
+		InterceptRules:   interceptRules,
+		AuthConfig:       req.AuthConfig,
 	})
 	if err != nil {
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
@@ -1839,6 +1817,15 @@ func (s *Server) seed(t *Task, text string) {
 		}
 		if rootID > 0 {
 			_ = as.SetTaskAssetSource(taskID, rootID, "task", "由任务描述或目标初始化", nil)
+			if t.lifecycleSnapshot().AssetContextMode == db.AssetContextTaskSources {
+				kind := "subdomain"
+				if net.ParseIP(host) != nil {
+					kind = "ip"
+				}
+				if _, err := as.AddAgentScope(taskID, kind, host, "由用户任务输入初始化的精确目标", "manual"); err != nil {
+					log.Printf("[seed] task %s: 初始化精确范围失败: %v", t.ID, err)
+				}
+			}
 		}
 	}
 	// anchor the seeded assets to this task's begin root as lineage/provenance
@@ -2243,6 +2230,13 @@ func (s *Server) findingStats(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	if r.URL.Query().Get("filtered") == "1" {
+		st.Filtered, err = s.m.pg.FilteredFindingCounts(findingFilterFromQuery(r.URL.Query()))
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	writeJSON(w, 200, st)
 }
@@ -3490,19 +3484,20 @@ func (s *Server) settingsPayload() map[string]any {
 	af := autoFinishConfigFromPG(s.m.pg)
 	ib := intentBudgetFromPG(s.m.pg)
 	return map[string]any{
-		"traffic_capture":       s.m.TrafficEnabled(),
-		"agent_traffic_binding": s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"llm_record":            s.m.LLMRecordEnabled(),
-		"web_search_enabled":    on,
-		"web_search_backend":    backend,
-		"brave_key_set":         strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":        strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":      proxy,             // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":          s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"egress_probe_url":      s.m.EgressProbeURL(),
-		"install_proxy":         s.installProxy(),            // 装机代理：只用于宿主工具安装(apt/GitHub下载)，与目标流量无关
-		"python_interpreter":    strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":               s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"traffic_capture":         s.m.TrafficEnabled(),
+		"agent_traffic_binding":   s.m.pg.GetBool(settingAgentTrafficBinding, false),
+		"llm_record":              s.m.LLMRecordEnabled(),
+		"web_search_enabled":      on,
+		"web_search_backend":      backend,
+		"deepseek_search_key_set": s.searchAPIKeyConfigured(),
+		"brave_key_set":           strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":          strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":        proxy,             // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":            s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"egress_probe_url":        s.m.EgressProbeURL(),
+		"install_proxy":           s.installProxy(),            // 装机代理：只用于宿主工具安装(apt/GitHub下载)，与目标流量无关
+		"python_interpreter":      strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                 s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
 		// 冷节点压缩的输出预算与墙钟上限。0 = 用默认值(32768 token / 20 分钟)。
 		"compaction_max_tokens":      s.m.CompactionTokens(),
 		"compaction_timeout_seconds": s.m.CompactionTimeout(),
@@ -3590,16 +3585,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
-		WebSearchEnabled *bool   `json:"web_search_enabled"`
-		WebSearchBackend *string `json:"web_search_backend"`
-		BraveKey         *string `json:"brave_search_api_key"`
-		TavilyKey        *string `json:"tavily_search_api_key"`
-		WebSearchProxy   *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
-		GlobalProxy      *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
-		EgressProbeURL   *string `json:"egress_probe_url"`   // null=不改，空串=恢复各入口原有默认
-		InstallProxy     *string `json:"install_proxy"`      // 装机代理：宿主工具安装用；null=不改，""=清空(直连)。不触发 agent 重建
-		PythonInterp     *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
-		Workers          *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
+		WebSearchEnabled  *bool   `json:"web_search_enabled"`
+		WebSearchBackend  *string `json:"web_search_backend"`
+		DeepSeekSearchKey *string `json:"deepseek_search_api_key"`
+		BraveKey          *string `json:"brave_search_api_key"`
+		TavilyKey         *string `json:"tavily_search_api_key"`
+		WebSearchProxy    *string `json:"web_search_proxy"`   // 独立出口代理(http/https/socks5)；null=不改，""=清空
+		GlobalProxy       *string `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		EgressProbeURL    *string `json:"egress_probe_url"`   // null=不改，空串=恢复各入口原有默认
+		InstallProxy      *string `json:"install_proxy"`      // 装机代理：宿主工具安装用；null=不改，""=清空(直连)。不触发 agent 重建
+		PythonInterp      *string `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
+		Workers           *int    `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		// 冷节点压缩的输出预算与墙钟上限。null=不改，<=0=恢复默认。
 		// 见 agent.Compactor.outTokens:思考型模型的思考长度随 max_tokens 预算
 		// 线性膨胀,预算给小了模型会一直想、正文一个字都吐不出来。
@@ -3929,7 +3925,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// 只影响后续安装动作，不改变 agent 行为，无需 applyLLM 重建。
 	}
-	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil {
+	if req.WebSearchEnabled != nil || req.WebSearchBackend != nil || req.BraveKey != nil || req.TavilyKey != nil || req.WebSearchProxy != nil || req.DeepSeekSearchKey != nil {
 		// Fill unspecified fields from current state so a partial PUT doesn't reset them.
 		on, backend, _, _, _ := s.m.WebSearch()
 		if req.WebSearchEnabled != nil {
@@ -3941,6 +3937,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		if err := s.m.SetWebSearch(on, backend, req.BraveKey, req.TavilyKey, req.WebSearchProxy); err != nil {
 			writeErr(w, 500, err.Error())
 			return
+		}
+		if req.DeepSeekSearchKey != nil {
+			if err := s.m.pg.SetSetting(settingDeepSeekSearchKey, strings.TrimSpace(*req.DeepSeekSearchKey)); err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
 		}
 		changed = true
 	}
@@ -3966,23 +3968,28 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 // not retype them. Always 200 with {ok, error?, count?, backend?}.
 func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Backend   string `json:"web_search_backend"`
-		Proxy     string `json:"web_search_proxy"`
-		BraveKey  string `json:"brave_search_api_key"`
-		TavilyKey string `json:"tavily_search_api_key"`
+		Backend           string  `json:"web_search_backend"`
+		Proxy             *string `json:"web_search_proxy"`
+		BraveKey          string  `json:"brave_search_api_key"`
+		TavilyKey         string  `json:"tavily_search_api_key"`
+		DeepSeekSearchKey string  `json:"deepseek_search_api_key"`
 	}
 	// Empty body is fine — fall back entirely to the saved config below.
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	_, backend, storedBraveKey, storedTavilyKey, _ := s.m.WebSearch()
+	_, backend, storedBraveKey, storedTavilyKey, storedProxy := s.m.WebSearch()
 	if strings.TrimSpace(req.Backend) != "" {
 		backend = req.Backend
 	}
 	// Proxy is taken from the form as-is (empty = direct), so testing reflects exactly
 	// what's shown — including an intentional "clear proxy to test direct" before saving.
-	proxy := strings.TrimSpace(req.Proxy)
+	proxy := storedProxy
+	if req.Proxy != nil {
+		proxy = strings.TrimSpace(*req.Proxy)
+	}
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	// API keys are secrets the form omits when already saved, so fall back to stored.
 	braveKey := storedBraveKey
 	if strings.TrimSpace(req.BraveKey) != "" {
@@ -3993,6 +4000,12 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		tavilyKey = req.TavilyKey
 	}
 	cfg := actool.WebSearchConfig{Backend: backend, BraveAPIKey: braveKey, TavilyAPIKey: tavilyKey, Proxy: proxy}
+	if backend == "deepseek-search" {
+		cfg.DeepSeekAPIKey, _, _ = s.m.pg.GetSetting(settingDeepSeekSearchKey)
+		if strings.TrimSpace(req.DeepSeekSearchKey) != "" {
+			cfg.DeepSeekAPIKey = req.DeepSeekSearchKey
+		}
+	}
 	// Hard cap so a slow/blocked proxy can't hang the request.
 	wall := 30 * time.Second
 	// deepseek 的凭据不在表单里，来自当前激活的 LLM 配置；同时它每次搜索都跑一次
@@ -4012,11 +4025,7 @@ func (s *Server) testWebSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error(), "backend": backend})
 		return
 	}
-	if len(results) == 0 {
-		writeJSON(w, 200, map[string]any{"ok": false, "error": "搜索返回 0 条结果（可能被限流或代理不通）", "backend": backend})
-		return
-	}
-	writeJSON(w, 200, map[string]any{"ok": true, "count": len(results), "backend": backend})
+	writeJSON(w, 200, map[string]any{"ok": true, "count": len(results), "backend": backend, "note": "已收到有效搜索响应；零结果只表示本次查询没有匹配，不据此判断目标安全或代理故障"})
 }
 
 // mainSessions lists the task's main-agent conversation segments (newest-first) and

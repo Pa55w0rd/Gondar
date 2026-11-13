@@ -22,6 +22,7 @@ import { Card, CardContent, CardHeader, } from "@/components/ui/card";
 import { type ChartConfig, ChartContainer, ChartTooltip, ChartTooltipContent } from "@/components/ui/chart";
 import { Progress } from "@/components/ui/progress";
 import { api } from "@/lib/api";
+import { startPollSource } from "@/lib/poll-source";
 import type {
   Activity,
   Agent,
@@ -152,112 +153,37 @@ export default function DashboardPage() {
   const [tools, setTools] = React.useState<Tool[]>([]);
   const [llmProfiles, setLLMProfiles] = React.useState<LLMProfile[]>([]);
 
-  // The task list is the most expensive dashboard source. Poll it independently
-  // so a large history cannot hold back every other dashboard panel.
+  // Every panel owns its request/timer: one slow or failing source cannot hold
+  // back another panel, and a hidden page starts no background requests.
   React.useEffect(() => {
-    let alive = true;
-    let loading = false;
     let signature = "";
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const tr = await api.tasks();
-        if (!alive) return;
-        const nextSignature = JSON.stringify(tr.tasks);
-        if (nextSignature !== signature) {
-          signature = nextSignature;
-          setTasks(tr.tasks);
-        }
-      } catch {
-        /* transient errors — next poll retries */
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, []);
-
-  // The remaining fast sources stay batched so one poll causes a single render.
-  React.useEffect(() => {
-    let alive = true;
-    let loading = false;
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const [findingsPage, fstats, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
-          api.findingsPage({ page: 1, pageSize: 8, sort: "time" }),
-          api.findingStats(),
-          api.stats(),
-          api.settings(),
-          api.interceptPending(),
-          api.activity(undefined, { limit: 30 }),
-          api.tokenStats(),
-          api.conversationTokens(),
-        ]);
-        if (!alive) return;
-        setFindings(findingsPage.items);
-        setFindingStatsData(fstats);
-        setStats(stats);
-        setSettings(settings);
-        setPending(pending);
-        setActivity(activity.items);
-        setTokens(tokens.total ?? null);
-        setConvTokens(conversationTokens);
-      } catch {
-        // Preserve stale data and retry on the next interval.
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
-  }, []);
-
-  // slow poll: traffic, assets, system-static (every 15s)
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
-          api.traffic(0, 50),
-          api.assetCounts(),
-          api.agents(),
-          api.mcpServers(),
-          api.skills(),
-          api.tools(),
-          api.llmProfiles(),
-          api.usageStats(365),
-        ]);
-        if (!alive) return;
-        setTraffic(traf.exchanges ?? []);
-        setAssetCounts(counts ?? {});
-        setAgents(agentList);
-        setMcpServers(mcpList);
-        setSkills(skillList);
-        setTools(toolList);
-        setLLMProfiles(profileList);
-        setUsageStats(usage);
-      } catch {
-        /* transient errors */
-      }
-    };
-    void load();
-    const t = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+    const poll = <T,>(load: () => Promise<T>, receive: (value: T) => void, interval = 5000) =>
+      startPollSource(load, receive, interval);
+    const sources = [
+      poll(() => api.tasks(), (value) => {
+        const next = JSON.stringify(value.tasks);
+        if (next === signature) return;
+        signature = next;
+        setTasks(value.tasks);
+      }),
+      poll(() => api.findingsPage({ page: 1, pageSize: 8, sort: "time" }), (value) => setFindings(value.items)),
+      poll(() => api.findingStats(), setFindingStatsData),
+      poll(() => api.stats(), setStats),
+      poll(() => api.settings(), setSettings),
+      poll(() => api.interceptPending(), setPending),
+      poll(() => api.activity(undefined, { limit: 30 }), (value) => setActivity(value.items)),
+      poll(() => api.tokenStats(), (value) => setTokens(value.total ?? null)),
+      poll(() => api.conversationTokens(), setConvTokens),
+      poll(() => api.traffic(0, 50), (value) => setTraffic(value.exchanges ?? []), 15000),
+      poll(() => api.assetCounts(), (value) => setAssetCounts(value ?? {}), 15000),
+      poll(() => api.agents(), setAgents, 15000),
+      poll(() => api.mcpServers(), setMcpServers, 15000),
+      poll(() => api.skills(), setSkills, 15000),
+      poll(() => api.tools(), setTools, 15000),
+      poll(() => api.llmProfiles(), setLLMProfiles, 15000),
+      poll(() => api.usageStats(365), setUsageStats, 15000),
+    ];
+    return () => sources.forEach((source) => source.stop());
   }, []);
 
   // ── derived ───────────────────────────────────────────────────────────────

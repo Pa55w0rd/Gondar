@@ -7,8 +7,53 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/norma/toolcall"
 	"gondar/db"
 )
+
+func TestTraceTypedSameParametersAndLateOrdering(t *testing.T) {
+	ctx, trace := WithTrace(toolcall.WithRunID(context.Background(), "host"), "synthetic", nil)
+	id := func(inv string) toolcall.Identity {
+		return toolcall.Identity{Version: 1, RunID: "host", PromptID: "prompt", InvocationID: inv, ToolUseID: "reused", ToolName: "Bash"}
+	}
+	input := []byte(`{"command":"synthetic"}`)
+	for _, inv := range []string{"a", "b"} {
+		identity := id(inv)
+		trace.StartInvocation(identity, "Bash", input)
+		a := auditFor(WithCall(toolcall.WithInvocation(ctx, toolcall.New(identity)), "Bash", input), Decision{}, input, "pending")
+		if a.InvocationID != inv || a.Correlation != "exact" {
+			t.Fatalf("同参关联被猜测 %+v", a)
+		}
+	}
+	entered, release, lateDone := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	var statuses []string
+	trace.bind(id("a").Key(), func(status, output string, cut bool) {
+		if status == "unknown" {
+			close(entered)
+			<-release
+		}
+		mu.Lock()
+		statuses = append(statuses, status)
+		mu.Unlock()
+	})
+	outcome := &toolcall.Outcome{Identity: id("a"), Phase: "result", Kind: toolcall.Cancelled, ExecutionState: toolcall.Unknown}
+	go trace.CompleteOutcome(id("a").Key(), "interrupted", true, outcome)
+	<-entered
+	late := *outcome
+	late.Phase = "late_receipt"
+	late.Kind = toolcall.ExecutedSuccess
+	late.ExecutionState = toolcall.Executed
+	go func() { trace.CompleteLate(id("a").Key(), "actual", false, &late); close(lateDone) }()
+	close(release)
+	<-lateDone
+	trace.Finish()
+	mu.Lock()
+	defer mu.Unlock()
+	if len(statuses) != 2 || statuses[0] != "unknown" || statuses[1] != "late_succeeded" {
+		t.Fatalf("晚回执越过主回执 %+v", statuses)
+	}
+}
 
 func TestTraceExactCorrelationAndSnapshot(t *testing.T) {
 	ctx, trace := WithTrace(context.Background(), "save report", []db.InterceptContextEntry{{Kind: "user", Text: "prior message"}})

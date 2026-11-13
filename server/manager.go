@@ -62,6 +62,7 @@ type Task struct {
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
 	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
 	CompletionMode       string                 `json:"completion_mode"`
+	AssetContextMode     string                 `json:"asset_context_mode"`
 	FirstRunAt           int64                  `json:"first_run_at,omitempty"`
 	DeadlineAt           int64                  `json:"deadline_at,omitempty"`
 	Store                *pgdb.ExplorationStore `json:"-"`
@@ -125,22 +126,23 @@ func (t *Task) hasPendingFreshDirection() bool {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
-	CompletionMode string
-	TimeoutSeconds int
-	Name           string
-	PinnedAt       int64
-	Status         string
-	Paused         bool
-	Queued         bool
-	QueuedAt       int64
-	QueueMode      string
-	CompletedAt    int64
-	FirstRunAt     int64
-	DeadlineAt     int64
-	SourceTaskIDs  []int64
-	CompanyIDs     []int64
-	CategoryID     *int64
-	CategoryName   string
+	CompletionMode   string
+	AssetContextMode string
+	TimeoutSeconds   int
+	Name             string
+	PinnedAt         int64
+	Status           string
+	Paused           bool
+	Queued           bool
+	QueuedAt         int64
+	QueueMode        string
+	CompletedAt      int64
+	FirstRunAt       int64
+	DeadlineAt       int64
+	SourceTaskIDs    []int64
+	CompanyIDs       []int64
+	CategoryID       *int64
+	CategoryName     string
 }
 
 func (t *Task) lifecycleSnapshot() taskLifecycleState {
@@ -155,20 +157,21 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
 		CompletionMode: t.CompletionMode, TimeoutSeconds: t.TimeoutSeconds,
-		Name:          t.Name,
-		PinnedAt:      t.PinnedAt,
-		Status:        t.Status,
-		Paused:        t.Paused,
-		Queued:        t.Queued,
-		QueuedAt:      t.QueuedAt,
-		QueueMode:     t.QueueMode,
-		CompletedAt:   t.CompletedAt,
-		FirstRunAt:    t.FirstRunAt,
-		DeadlineAt:    t.DeadlineAt,
-		SourceTaskIDs: append([]int64(nil), t.SourceTaskIDs...),
-		CompanyIDs:    append([]int64(nil), t.CompanyIDs...),
-		CategoryID:    cloneInt64Ptr(t.CategoryID),
-		CategoryName:  t.CategoryName,
+		AssetContextMode: t.AssetContextMode,
+		Name:             t.Name,
+		PinnedAt:         t.PinnedAt,
+		Status:           t.Status,
+		Paused:           t.Paused,
+		Queued:           t.Queued,
+		QueuedAt:         t.QueuedAt,
+		QueueMode:        t.QueueMode,
+		CompletedAt:      t.CompletedAt,
+		FirstRunAt:       t.FirstRunAt,
+		DeadlineAt:       t.DeadlineAt,
+		SourceTaskIDs:    append([]int64(nil), t.SourceTaskIDs...),
+		CompanyIDs:       append([]int64(nil), t.CompanyIDs...),
+		CategoryID:       cloneInt64Ptr(t.CategoryID),
+		CategoryName:     t.CategoryName,
 	}
 }
 
@@ -180,6 +183,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	state := t.lifecycleSnapshotLocked()
 	update(&state)
 	t.CompletionMode = state.CompletionMode
+	t.AssetContextMode = state.AssetContextMode
 	t.TimeoutSeconds = state.TimeoutSeconds
 	t.Name = state.Name
 	t.PinnedAt = state.PinnedAt
@@ -332,6 +336,7 @@ const (
 	settingBraveKey            = "brave_search_api_key"
 	settingTavilyKey           = "tavily_search_api_key"
 	settingWebSearchProxy      = "web_search_proxy"
+	settingDeepSeekSearchKey   = "deepseek_search_api_key"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
@@ -804,6 +809,7 @@ func (m *Manager) WebSearch() (on bool, backend, braveKey, tavilyKey, proxy stri
 // its key (so a half-configured backend never silently drops the tool at session build).
 func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	on, backend, braveKey, tavilyKey, proxy := m.WebSearch()
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	if on && backend == "brave-free" && strings.TrimSpace(braveKey) == "" {
 		on = false
 	}
@@ -813,6 +819,12 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	o := agent.WebSearchOpts{Enabled: on, Backend: backend, BraveKey: braveKey, TavilyKey: tavilyKey, Proxy: proxy}
 	if backend == deepSeekWebSearchBackend {
 		o.DeepSeekBaseURL, o.DeepSeekAPIKey, o.DeepSeekModel = m.deepSeekSearchCreds()
+	}
+	if backend == "deepseek-search" {
+		o.DeepSeekAPIKey, _, _ = m.pg.GetSetting(settingDeepSeekSearchKey)
+		if strings.TrimSpace(o.DeepSeekAPIKey) == "" {
+			o.Enabled = false
+		}
 	}
 	return o
 }
@@ -866,7 +878,7 @@ func (m *Manager) ProxyPoolEnabled() bool {
 // key/proxy; pass a pointer to "" to clear). Callers must rebuild agents (applyLLM)
 // afterwards so the settings take effect.
 func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, proxy *string) error {
-	backend = strings.TrimSpace(backend)
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	if backend == "" {
 		backend = defaultWebSearchBackend
 	}
@@ -1197,9 +1209,10 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		SourceTaskIDs:  append([]int64(nil), pt.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), pt.CompanyIDs...),
 		TimeoutSeconds: pt.TimeoutSeconds, PlanHeartbeatSeconds: pt.PlanHeartbeatSeconds,
-		CoverageEnabled: pt.CoverageEnabled,
-		CompletionMode:  pt.CompletionMode,
-		FirstRunAt:      unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
+		CoverageEnabled:  pt.CoverageEnabled,
+		CompletionMode:   pt.CompletionMode,
+		AssetContextMode: pt.AssetContextMode,
+		FirstRunAt:       unixOrZero(pt.FirstRunAt), DeadlineAt: unixOrZero(pt.DeadlineAt),
 		Store: store, Guard: guard.NewWithInterceptor(ic), notify: make(chan struct{}, 1),
 	}
 }
@@ -1226,6 +1239,7 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 	task.updateLifecycle(func(state *taskLifecycleState) {
 		state.Name = updated.Name
 		state.PinnedAt = unixOrZero(updated.PinnedAt)
+		state.AssetContextMode = updated.AssetContextMode
 	})
 	return task, nil
 }

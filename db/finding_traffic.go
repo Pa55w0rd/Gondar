@@ -334,6 +334,9 @@ type RecordFindingInput struct {
 	TaskID, ExplorationID, IntentID                      int64
 	VulnClass, Name, Severity, Summary, Evidence, Worker string
 	AssetIDs                                             []int64
+	Automatic                                            bool
+	ExecutionRunID                                       string
+	Provenance                                           *FindingProvenanceInput
 }
 
 type RecordedFinding struct {
@@ -343,6 +346,7 @@ type RecordedFinding struct {
 	// Duplicate=true 表示本次上报命中了同任务内已有的同指纹漏洞,证据已合并
 	// 进原记录(而不是新建);调用方应据此提示模型停止重复上报。
 	Duplicate bool `json:"-"`
+	Replay    bool `json:"-"`
 	// SkippedRefs 是本次提交里无法解析(流量 ID 不存在/正文不可读)的引用。
 	// 漏洞本身照常入库——猜错一个 ID 不该丢掉已确认的漏洞——但调用方要把
 	// 这些 ID 原样回给模型,让它知道哪些证据没挂上。
@@ -402,6 +406,10 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 			return nil, errors.New("intent_id 必须是本任务的意图（关联任务意图只读）")
 		}
 	}
+	provenance, err := validateFindingProvenanceTx(ctx, tx, in, prepared)
+	if err != nil {
+		return nil, err
+	}
 	// ── 同任务内指纹去重:同一 (vulnclass,name,assets) 视为同一漏洞的重复上报,
 	// 证据合并进已有记录而不是再插一行——"报了 A 又把 A 重新报一遍"在写入层被
 	// 硬性拦住,不依赖模型自觉。
@@ -414,22 +422,44 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 	// 都基于标准值——SQLi 与 SQL注入 从此是同一类别、同一指纹。
 	in.VulnClass = NormalizeVulnClass(in.VulnClass)
 	fp := FindingFingerprint(in)
-	if in.TaskID > 0 && fp != "" && len(in.AssetIDs) > 0 {
+	if in.TaskID > 0 && fp != "" && (len(in.AssetIDs) > 0 || provenance != nil) {
 		var (
 			dupeID     int64
 			dupeNode   int64
 			dupeStatus string
 		)
+		replayJSON := []byte(`[]`)
+		if provenance != nil {
+			replayJSON = provenanceReplayJSON(provenance)
+		}
 		err := tx.QueryRow(`SELECT id, COALESCE(node_id,0), status FROM findings
 			WHERE task_id=$1 AND fingerprint=$2
 			  AND status IN ('pending','in_progress','confirmed')
-			ORDER BY id LIMIT 1 FOR UPDATE`, in.TaskID, fp).Scan(&dupeID, &dupeNode, &dupeStatus)
+			  AND ($3 OR EXISTS(SELECT 1 FROM exploration_nodes n WHERE n.id=findings.node_id AND COALESCE(n.payload->'finding_provenance_history','[]'::jsonb) @> $4::jsonb))
+			ORDER BY id LIMIT 1 FOR UPDATE`, in.TaskID, fp, len(in.AssetIDs) > 0, replayJSON).Scan(&dupeID, &dupeNode, &dupeStatus)
 		if err == nil {
+			replay := false
+			if provenance != nil && dupeNode > 0 {
+				if err := tx.QueryRowContext(ctx, `SELECT COALESCE(payload->'finding_provenance_history','[]'::jsonb) @> $2::jsonb FROM exploration_nodes WHERE id=$1`, dupeNode, provenanceReplayJSON(provenance)).Scan(&replay); err != nil {
+					return nil, err
+				}
+			}
 			stamp := time.Now().UTC().Format("2006-01-02 15:04")
 			appendix := fmt.Sprintf("\n\n--- 二次确认(worker=%s, %s UTC) ---\n%s", in.Worker, stamp, in.Evidence)
-			if _, err := tx.Exec(`UPDATE findings SET evidence = evidence || $2, severity = $3 WHERE id=$1`,
-				dupeID, appendix, in.Severity); err != nil {
-				return nil, err
+			if !replay {
+				if _, err := tx.Exec(`UPDATE findings SET evidence = evidence || $2, severity = $3 WHERE id=$1`,
+					dupeID, appendix, in.Severity); err != nil {
+					return nil, err
+				}
+			}
+			if provenance != nil && dupeNode > 0 && !replay {
+				raw, _ := json.Marshal(provenance)
+				if _, err := tx.ExecContext(ctx, `UPDATE exploration_nodes SET payload=jsonb_set(jsonb_set(payload,'{finding_provenance}',$2::jsonb),'{finding_provenance_history}',COALESCE(payload->'finding_provenance_history','[]'::jsonb)||jsonb_build_array($2::jsonb)) WHERE id=$1`, dupeNode, raw); err != nil {
+					return nil, err
+				}
+				if err := bumpEvidenceVersionTx(tx, dupeID); err != nil {
+					return nil, err
+				}
 			}
 			// 血缘:这个 intent 也(再次)产出了该漏洞节点,planner 链路完整。
 			if in.IntentID > 0 && dupeNode > 0 {
@@ -440,7 +470,7 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 					return nil, err
 				}
 			}
-			out := &RecordedFinding{FindingID: dupeID, NodeID: dupeNode, Duplicate: true}
+			out := &RecordedFinding{FindingID: dupeID, NodeID: dupeNode, Duplicate: true, Replay: replay}
 			// 重复上报同样要把本次带来的流量挂到原记录上:二次确认往往带着
 			// 更新后的复现包(不同响应码/新载荷),只并文字证据会把它丢掉。
 			if err := AddFindingTrafficTx(tx, dupeID, prepared); err != nil {
@@ -450,7 +480,12 @@ func RecordFindingTx(ctx context.Context, tx *sql.Tx, in RecordFindingInput, pre
 			return out, err
 		}
 	}
-	payload, _ := json.Marshal(map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}})
+	payloadFields := map[string]any{"vulnclass": in.VulnClass, "name": in.Name, "severity": in.Severity, "summary": in.Summary, "evidence": map[string]any{"by": in.Worker, "poc": in.Evidence}}
+	if provenance != nil {
+		payloadFields["finding_provenance"] = provenance
+		payloadFields["finding_provenance_history"] = []*FindingProvenance{provenance}
+	}
+	payload, _ := json.Marshal(payloadFields)
 	out := &RecordedFinding{}
 	if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
 VALUES($1,'finding',$2,9,'confirmed',$3) RETURNING id`, in.ExplorationID, string(payload), in.Worker).Scan(&out.NodeID); err != nil {
@@ -491,7 +526,6 @@ VALUES(NULLIF($1,0),$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`, in.TaskID, out.N
 	if err := AddFindingTrafficTx(tx, out.FindingID, prepared); err != nil {
 		return nil, err
 	}
-	var err error
 	out.Traffic, err = FindingTrafficTx(tx, out.FindingID)
 	return out, err
 }
@@ -543,23 +577,5 @@ func (s *ExplorationStore) PopulateFindingTrafficIDs(nodes []*Node) error {
 }
 
 func (d *DB) SetFindingReportVersionByNodeID(ctx context.Context, nodeID int64, report string, version *int64) (n int64, err error) {
-	err = d.WithEvidenceTx(ctx, func(tx *sql.Tx) error {
-		var id int64
-		if err := tx.QueryRow(`SELECT id FROM findings WHERE node_id=$1`, nodeID).Scan(&id); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return nil
-			}
-			return err
-		}
-		if err := LockFindingEvidenceTx(tx, id, version); err != nil {
-			return err
-		}
-		res, err := tx.Exec(`UPDATE findings SET report=$2,report_evidence_version=COALESCE($3::bigint,CASE WHEN evidence_version=0 THEN 0 ELSE -1 END) WHERE id=$1`, id, report, version)
-		if err != nil {
-			return err
-		}
-		n, err = res.RowsAffected()
-		return err
-	})
-	return
+	return d.SetFindingReportWithSourceByNodeID(ctx,nodeID,report,version,nil)
 }

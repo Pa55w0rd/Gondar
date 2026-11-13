@@ -435,7 +435,7 @@ func (t *ToolSet) addTaskScope() actool.CoreTool {
 			"kind 支持：company(整个公司名下资产) / root_domain(整个根域，含所有子域) / subdomain(单个精确子域) / ip / cidr / icp / keyword。\n"+
 			"说明：worker 逐个碰到的主机会被系统【自动】加进范围(精确子域)；本工具用于【主动扩大】——把整个根域/整个公司纳入，或补充指定某子域/IP。\n"+
 			"value：company 传公司名或 id(公司须已存在)；root_domain/subdomain 传域名；ip/cidr 传 IP 或网段；icp/keyword 传备案号或企业关键词。\n"+
-			"务必给 reason 说明依据(可审计)。多条用 entries 数组。",
+			"务必给 reason 说明依据(可审计)。多条用 entries 数组。仅本任务资料模式下只可幂等复用已有规则；新增范围须由用户明确登记，不能从新发现或历史资料推定授权。",
 		obj(map[string]any{
 			"entries": map[string]any{"type": "array", "description": "批量：[{kind, value}]。kind∈company/root_domain/subdomain/ip/cidr/icp/keyword。", "items": map[string]any{"type": "object"}},
 			"kind":    str("[单条] company / root_domain / subdomain / ip / cidr / icp / keyword"),
@@ -672,7 +672,21 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 				Search string `json:"search"`
 			}
 			_ = json.Unmarshal(in, &a)
-			cos, err := t.cs.ListCompanies()
+			var cos []*db.CompanyWithScope
+			var err error
+			narrow := false
+			if t.taskID > 0 && t.as != nil {
+				mode, modeErr := t.as.TaskAssetContextMode(t.taskID)
+				if modeErr != nil {
+					return actool.Errorf("读取任务资料来源失败: " + modeErr.Error()), nil
+				}
+				narrow = mode == db.AssetContextTaskSources
+			}
+			if narrow {
+				cos, err = t.cs.ListCompaniesInTask(t.taskID)
+			} else {
+				cos, err = t.cs.ListCompanies()
+			}
 			if err != nil {
 				return actool.Errorf("查询公司失败: " + err.Error()), nil
 			}
@@ -694,7 +708,11 @@ func (t *ToolSet) listCompanies() actool.CoreTool {
 				}
 				out = append(out, companyOut{ID: c.ID, Name: c.Name, AssetCount: c.AssetCount, Scope: scope})
 			}
-			return jsonResult(map[string]any{"count": len(out), "companies": out})
+			result := map[string]any{"count": len(out), "companies": out}
+			if narrow {
+				result["note"] = "仅列本任务当前可见资料关联及明确选择的企业；asset_count是当前可见资产数。企业scope仅作资料参考，执行仍以本任务声明范围为准，不自动扩大授权。"
+			}
+			return jsonResult(result)
 		},
 	)
 }
@@ -745,6 +763,7 @@ func (t *ToolSet) WorkerTools() []actool.CoreTool {
 		t.diffResponses(),
 		// api_contract：读目标暴露的 API 契约文件，拿到比爬虫更准的接口清单。
 		t.apiContractTool(),
+		t.frontendInventoryTool(),
 		// search_recent_critical：按【时间】查最近披露的高危漏洞（不需先知道组件名/CVE 号）。
 		t.searchRecentCritical(),
 		// save_evidence / list_artifacts：证据附件（v0.5.0）——截图/数据样本/日志
@@ -791,6 +810,7 @@ func (t *ToolSet) MainAgentTools() []actool.CoreTool {
 		t.diffResponses(),
 		// api_contract：读目标暴露的 API 契约文件，拿到比爬虫更准的接口清单。
 		t.apiContractTool(),
+		t.frontendInventoryTool(),
 		// search_recent_critical：按【时间】查最近披露的高危漏洞（不需先知道组件名/CVE 号）。
 		t.searchRecentCritical(),
 	}

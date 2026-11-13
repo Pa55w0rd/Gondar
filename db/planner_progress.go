@@ -124,7 +124,7 @@ ORDER BY a.id DESC LIMIT 3`, s.expID)
 			break
 		}
 		switch outcome.Code {
-		case "planner_model_unavailable", "planner_model_timeout", "planner_no_progress", "planner_tool_failure_loop", "planner_read_loop", "planner_round_timeout", "planner_response_interrupted":
+		case "planner_model_unavailable", "planner_model_timeout", "planner_no_progress", "planner_tool_failure_loop", "planner_input_loop", "planner_policy_loop", "planner_prerequisite_loop", "planner_tool_outcome_unknown_loop", "planner_read_loop", "planner_round_timeout", "planner_response_interrupted":
 		default:
 			goto complete
 		}

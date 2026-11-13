@@ -1,5 +1,5 @@
 // 回连接收器 REST API：列出/启动/停止/查会话。授权面与全部业务 API 一致
-//（JWT）；启停的 agent 侧审批由拦截规则「[内置] 启停回连接收器」（ask）负责。
+// （JWT）；启停的 agent 侧审批由拦截规则「[内置] 启停回连接收器」（ask）负责。
 package server
 
 import (
@@ -15,6 +15,7 @@ type listenerView struct {
 	Port      int                `json:"port"`
 	StartedAt string             `json:"started_at"`
 	Sessions  []listener.Session `json:"sessions"`
+	Stats     listener.Stats     `json:"stats"`
 }
 
 // GET /api/listeners — 全部运行中的监听器（含各自会话快照）。
@@ -30,6 +31,7 @@ func (s *Server) listenerList(w http.ResponseWriter, r *http.Request) {
 			Port:      l.Port,
 			StartedAt: l.StartedAt.UTC().Format("2006-01-02T15:04:05Z"),
 			Sessions:  l.Snapshot(),
+			Stats:     l.Stats(),
 		})
 	}
 	writeJSON(w, 200, map[string]any{"listeners": out})
@@ -76,7 +78,8 @@ func (s *Server) listenerSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 404, "监听器不存在: "+name)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"name": name, "sessions": sessions})
+	stats, _ := s.listeners.Stats(name)
+	writeJSON(w, 200, map[string]any{"name": name, "sessions": sessions, "stats": stats})
 }
 
 // POST /api/listeners/{name}/stop — 停止并返回最终快照。

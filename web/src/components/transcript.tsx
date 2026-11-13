@@ -23,6 +23,8 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { ApprovalDetail } from "@/components/approval-records";
 import type { Activity, InterceptPending } from "@/lib/types";
+import { groupSteps, toolStatus, type TranscriptGroup as Group } from "@/lib/transcript-groups";
+import { observeNearViewport } from "@/lib/observe-near-viewport";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
 const workerColors = [
@@ -56,19 +58,8 @@ function useInView(rootMargin = "400px"): [React.RefObject<HTMLDivElement | null
     if (inView) return; // latch: once seen, stop observing
     const el = ref.current;
     if (!el) return;
-    if (typeof IntersectionObserver === "undefined") {
-      setInView(true);
-      return;
-    }
     const root = el.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null;
-    const ob = new IntersectionObserver(
-      (entries) => {
-        if (entries.some((e) => e.isIntersecting)) setInView(true);
-      },
-      { root, rootMargin },
-    );
-    ob.observe(el);
-    return () => ob.disconnect();
+    return observeNearViewport(el, root, rootMargin, () => setInView(true));
   }, [inView, rootMargin]);
   return [ref, inView];
 }
@@ -76,59 +67,6 @@ function useInView(rootMargin = "400px"): [React.RefObject<HTMLDivElement | null
 // A tool group pairs a tool_use with its matching tool_result (by tool_use_id);
 // a run of consecutive conversational steps (text/thinking/result) from the same
 // agent is one "message".
-type Group =
-  | { type: "user"; key: number; step: Activity; intent?: boolean }
-  | { type: "answer"; key: number; step: Activity }
-  | { type: "round"; key: number; label: string }
-  | { type: "tool"; key: number; worker: string; use?: Activity; result?: Activity }
-  | { type: "msg"; key: number; worker: string; steps: Activity[] }
-  | { type: "intercept"; key: number; step: Activity };
-
-function groupSteps(steps: Activity[], chat: boolean): Group[] {
-  const out: Group[] = [];
-  const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
-  for (const s of steps) {
-    if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
-    if (s.kind === "round") {
-      out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
-      continue;
-    }
-    if (s.kind === "intercept_request") {
-      out.push({ type: "intercept", key: s.seq, step: s });
-      continue;
-    }
-    if (s.kind === "user" || s.kind === "intent") {
-      // human turn OR the LLM-generated intent leading a worker session — both are
-      // right-aligned bubbles; `intent` swaps the avatar to a non-human icon.
-      out.push({ type: "user", key: s.seq, step: s, intent: s.kind === "intent" });
-      continue;
-    }
-    // In a chat (main agent) the assistant's text/result IS the answer — render it
-    // full (markdown), never collapsed. thinking still folds into a compact block.
-    if (s.kind === "result" || (chat && s.kind === "text")) {
-      out.push({ type: "answer", key: s.seq, step: s });
-      continue;
-    }
-    if (s.kind === "tool_use") {
-      const g: Extract<Group, { type: "tool" }> = { type: "tool", key: s.seq, worker: s.worker, use: s };
-      if (s.tool_use_id) byToolId.set(s.tool_use_id, g);
-      out.push(g);
-      continue;
-    }
-    if (s.kind === "tool_result") {
-      // bind to its tool_use by id (NOT adjacency — tools can run in parallel)
-      const g = s.tool_use_id ? byToolId.get(s.tool_use_id) : undefined;
-      if (g && !g.result) g.result = s;
-      else out.push({ type: "tool", key: s.seq, worker: s.worker, result: s }); // orphan result
-      continue;
-    }
-    const last = out[out.length - 1];
-    if (last && last.type === "msg" && last.worker === s.worker) last.steps.push(s);
-    else out.push({ type: "msg", key: s.seq, worker: s.worker, steps: [s] });
-  }
-  return out;
-}
-
 const kindLabel = (k: string) => (k === "thinking" ? "推理" : k === "result" ? "总结" : "说明");
 
 function ActivityTime({ ts }: { ts: string }) {
@@ -372,18 +310,17 @@ function ToolBlock({
   const { use, result } = group;
   const toolName = use?.tool || result?.tool || "工具";
   const ToolIcon = toolName === "Bash" ? Terminal : Wrench;
+  const status = toolStatus(result);
   const running = !result;
-  const ok = !!result && !result.is_error;
-  const statusTone = running
-    ? "text-muted-foreground"
-    : ok
-      ? "text-emerald-600 dark:text-emerald-400"
-      : "text-red-600 dark:text-red-400";
+  const statusTone = status.tone === "running" ? "text-muted-foreground"
+    : status.tone === "ok" ? "text-emerald-600 dark:text-emerald-400"
+      : status.tone === "blocked" ? "text-amber-600 dark:text-amber-400"
+        : "text-red-600 dark:text-red-400";
   const rawCmd =
     use?.summary.startsWith(toolName) ? use.summary.slice(toolName.length).trimStart() : (use?.summary ?? "");
   const cmd = toolInputText(toolName, rawCmd);
   // status only — the full result lives behind the expand (【输出】), not previewed inline
-  const statusText = running ? "执行中…" : ok ? "✓" : "✕ 失败";
+  const statusText = status.text;
 
   // key over the seqs we'd load; changes when the result (or command) arrives.
   const detailKey = `${use?.seq ?? ""}:${result?.seq ?? ""}`;

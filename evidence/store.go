@@ -231,6 +231,15 @@ func (s *Store) Record(ctx context.Context, in db.RecordFindingInput, refs []db.
 		if err != nil {
 			return err
 		}
+		if in.Automatic && in.Provenance != nil && len(in.Provenance.TrafficRefs) > 0 {
+			checked, _, err := s.prepare(ctx, in.Provenance.TrafficRefs)
+			if err != nil {
+				return err
+			}
+			copy := *in.Provenance
+			copy.CheckedTraffic = checked
+			in.Provenance = &copy
+		}
 		out, err = db.RecordFindingTx(ctx, tx, in, prepared)
 		if err != nil {
 			return err

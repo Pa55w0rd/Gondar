@@ -226,6 +226,9 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	if err := normalizeArchivedCompletionMode(snapshot.FormatVersion, taskRow); err != nil {
 		return nil, err
 	}
+	if err := normalizeArchivedAssetContextMode(taskRow); err != nil {
+		return nil, err
+	}
 	categoryID, _ := jsonInt64(taskRow["category_id"])
 	if categoryID > 0 && !rowExists(tx, "task_categories", categoryID) {
 		taskRow["category_id"] = nil
@@ -351,7 +354,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
  llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,
  timeout_seconds=archived.timeout_seconds,plan_heartbeat_seconds=archived.plan_heartbeat_seconds,
- coverage_enabled=archived.coverage_enabled,completion_mode=COALESCE(archived.completion_mode,'objective'),pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
+ coverage_enabled=archived.coverage_enabled,completion_mode=COALESCE(archived.completion_mode,'objective'),asset_context_mode=COALESCE(archived.asset_context_mode,'declared_scope'),pinned_at=archived.pinned_at,first_run_at=archived.first_run_at,
  deadline_at=CASE WHEN archived.paused AND $3>0 THEN now()+make_interval(secs=>$3::double precision)
                   ELSE archived.deadline_at END,
  deleted_at=NULL,archived_at=NULL,completed_at=archived.completed_at,
@@ -425,6 +428,30 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	}
 	if !allowed[table] {
 		return fmt.Errorf("archive restore table %q is not allowed", table)
+	}
+	if table == "activity" && rawRowCount(raw) > 0 {
+		var rows []map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return err
+		}
+		for _, row := range rows {
+			metadata := map[string]any{}
+			_ = json.Unmarshal(row["metadata"], &metadata)
+			if metadata == nil {
+				metadata = map[string]any{}
+			}
+			metadata["activity_origin"] = "archive_material"
+			encoded, err := json.Marshal(metadata)
+			if err != nil {
+				return err
+			}
+			row["metadata"] = encoded
+		}
+		var err error
+		raw, err = json.Marshal(rows)
+		if err != nil {
+			return err
+		}
 	}
 	if rawRowCount(raw) == 0 {
 		return nil
