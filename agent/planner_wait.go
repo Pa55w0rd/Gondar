@@ -96,7 +96,7 @@ func (w PlannerWait) Validate(ctx context.Context, store *db.ExplorationStore) e
 }
 
 func (t *ToolSet) recordPlannerWait() actool.CoreTool {
-	return t.writeExpTool("record_planner_wait", "明确交接当前无法执行的规划轮，等待具体前提/环境/新线索。先用record_verification保存真实阻塞并核对范围内其他可执行方向；有在跑或待执行意图时不可等待。引用本任务验证格稳定id，保留未完成步骤；这不是完成证明，也不自动重启任务。",
+	return t.writeExpTool("record_planner_wait", "保存当前分支的具体阻塞并请求最终等待核对，不立即暂停任务。宿主会先自动回复推进建议，刷新态势和未测候选；AI应自行核对现有条件、隔离受阻分支，把仍可执行的步骤补成目标和意图。自动复核后确实无其他方向才可交接等待。先用record_verification保存真实阻塞，引用本任务验证格稳定id；有待执行或运行中意图不可等待，旧目标met不代表持续任务结束。",
 		obj(map[string]any{
 			"kind":             map[string]any{"type": "string", "enum": []string{"missing_prerequisite", "environment_blocked", "no_executable_candidates"}},
 			"reason":           str("具体缺少什么，以及为何当前其他方向也无法执行；不填已测完"),
@@ -117,11 +117,11 @@ func (t *ToolSet) recordPlannerWait() actool.CoreTool {
 			}
 			wait.progress = &progress
 			t.plannerWait = &wait
-			return jsonResult(map[string]any{"accepted": true, "wait": wait, "scope": "仅说明当前等待条件，未登记和未验证面保持未知，不能认定任务完成"})
+			return jsonResult(map[string]any{"accepted": true, "task_paused": false, "stage": "host_review", "wait": wait, "scope": "已收到分支阻塞说明；宿主仍需复核其他方向，不代表任务已暂停或测试完成"})
 		})
 }
 
 const plannerDecisionGuidance = `
 
-【本轮从查阅转入决策】态势已预取，优先用具体未验证格、未完成步骤和真实证据决定下一步；最多12次没有实质进展的查阅，随后应提交少量可执行意图或明确交接等待。done仅代表一轮结束，旧目标met但proof_status为unverified/unknown仍是待核对项，不等同整片安全。parent_ids仅填写事实/发现ID数组，接续意图ID填写continues数组，例如continues:[123]；有新证据可继续，无总三代限制。没有可执行方向时，先保存缺前提/受阻/不确定格；核对其他方向确实不能执行后调用record_planner_wait，附验证格稳定ID和未完成步骤。未登记范围仍未知，不编造方向、不重复证明旧目标，也不把等待账号当模型或规划故障。
+【本轮从查阅转入决策】态势已预取，优先根据具体未验证格、未完成步骤和真实证据自行推导下一步；最多12次无实质进展的查阅，随后优先补充有依据的目标与可执行意图。done仅代表一轮结束，旧目标met但proof_status为unverified/unknown仍是待核对项。parent_ids仅填写事实/发现ID数组，continues仅填意图ID数组，例如[123]；有新证据可持续接续，无总三代限制。局部缺前提先保存受阻格并转向其他可执行分支，不把问题直接交给用户。record_planner_wait会先触发宿主自动推进复核，不立即暂停；自动复核后确实无法推进才附验证格ID和具体步骤重新交接。不得伪造条件、重复同向耗尽尝试或将等待当作覆盖完成。
 `

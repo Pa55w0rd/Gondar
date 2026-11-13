@@ -340,7 +340,7 @@ func renderGraphOverview(data map[string]any) string {
 // plannerDefaultTmpl is the built-in EDITABLE body (段 [A]) of the planner prompt,
 // seeded into agent_prompts. Goal is a {{.Goal}} template var; the 中间产物输出规约
 // tail is code-owned (artifactSpec) and appended by plannerSystem after rendering.
-const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读态势 → 判目标 → **只在确有未被覆盖的新方向时**补充探索意图。你是规划者、不是执行者：本轮所有产物只能是【生成/说清意图】或【判定目标】，绝不在 plan 里把活干了。
+const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系统的"规划者"，被频繁唤醒（图一变就唤醒）。职责：读最新态势 → 主动寻找有依据、未重复的可执行方向 → 必要时追加可核验目标 → 真实派发意图并核对结果。你是规划者、不是执行者：本轮产物是【目标、意图或目标判定】，具体执行交给worker，不在plan里把活干了。局部分支受阻时先自行核对已有材料、转向其他可执行方向，不立即将任务交给用户等待。
 
 任务目标：{{.Goal}}
 
@@ -493,7 +493,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
 	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
-	sysBody := plannerSystem(goal, p.workDir, taskDir) + completionGuidance(mode) + verificationReceiptGuidance + plannerDecisionGuidance
+	sysBody := plannerSystem(goal, p.workDir, taskDir) + completionGuidance(mode) + verificationReceiptGuidance + plannerDecisionGuidance + plannerAutonomyGuidance
 	if tc.Final {
 		sysBody += "\n【本轮是有限收尾】当前不是探索阶段；只读取已有材料、保存事实/证据和交接，不派发新意图、不请求目标。持续模式也遵守此阶段边界。"
 	}
@@ -559,8 +559,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		if progressErr != nil {
 			return false, "", progressErr
 		}
-		if (before.OpenGoals > 0 || mode == db.CompletionContinuous) && before.ActiveIntents == 0 {
+		if before.OpenGoals > 0 || mode == db.CompletionContinuous {
 			progress = &plannerProgressGuard{inner: opts.Hooks, store: ts, before: before, goalMet: func() bool { return tsx.GoalMet }, continuous: mode == db.CompletionContinuous, wait: func() *PlannerWait { return tsx.plannerWait }}
+			progress.recoverWait = func(ctx context.Context, wait PlannerWait) string { return tsx.recoverPlannerWait(ctx, wait, emit) }
 			opts.Hooks = progress
 		}
 	}
@@ -582,7 +583,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。
 		if active, err := ts.HasActiveIntent(); err == nil && !active {
 			if mode == db.CompletionContinuous {
-				lead = "本轮是**持续挖掘的定时巡检/恢复唤醒**，当前没有待执行或运行中的意图。保留已有目标证明，即使旧目标全部met也继续核对原授权范围内尚未验证的方向；有前置条件齐全、未重复的方向就真实调用add_intent提交。没有可执行方向则说明具体阻塞，交由宿主保护停止，不重复证明旧目标、不以文字冒充派发："
+				lead = "本轮是**持续挖掘的定时巡检/恢复唤醒**，当前没有待执行或运行中的意图。保留已有目标证明，先自行核对原授权范围内尚未验证的方向、已有条件和最新事实，隔离受阻分支；把有依据的新方向补成可验证目标和真实add_intent。不要因旧目标met或局部缺条件立即交接等待，也不以文字冒充派发："
 			} else {
 				lead = "本轮是定时巡检唤醒，当前没有open/running意图。先核对真实目标证据和未验证面；有前置齐全、未重复的方向就提交意图，缺前提则保存具体阻塞，不编造派发或安全结论："
 			}
@@ -612,7 +613,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	finalText, terminalReason, err = captureRun(ctx, opts, input,
 		func(r db.Activity) {
 			if progress != nil && r.Kind == "result" && !r.IsError && ctx.Err() == nil {
-				if validationErr := progress.validate(ctx); validationErr != nil {
+				if validationErr := progress.validateResult(ctx); validationErr != nil {
 					progressErr = validationErr
 					r.IsError = !errors.Is(validationErr, ErrPlannerWaiting)
 					r.Summary = "规划未落地：纠偏后仍没有实际动作"

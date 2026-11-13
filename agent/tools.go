@@ -2526,7 +2526,7 @@ func (t *ToolSet) listWorkerTraces() actool.CoreTool {
 // PlannerTools is the read + intent-generation + goal-judgement tool set.
 func (t *ToolSet) PlannerTools() []actool.CoreTool {
 	return []actool.CoreTool{
-		t.recordPlannerWait(),
+		t.recordPlannerWait(), t.addExplorationGoal(),
 		t.recordVerification(), t.listVerifications(),
 		t.listResources(), t.registerResource(), t.updateResource(),
 		t.listArtifacts(), t.previewEvidence(), t.proposeLesson(), t.recallLessons(),

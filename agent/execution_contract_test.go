@@ -127,7 +127,7 @@ func TestPlannerWaitIsExplicitAndNotNoProgress(t *testing.T) {
 	calls := 0
 	provider := plannerStateProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
-		if calls == 1 {
+		if calls == 1 || calls == 3 {
 			raw, _ := json.Marshal(wait)
 			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: "wait", Name: "record_planner_wait", Input: raw}}}, "tool_use", llm.Usage{}, nil
 		}
@@ -137,7 +137,7 @@ func TestPlannerWaitIsExplicitAndNotNoProgress(t *testing.T) {
 	p.SetNonStreaming(func() bool { return true })
 	met, _, err := p.Plan(t.Context(), task.ID, nil, store, task.Goal, nil, nil)
 	var waiting *PlannerWaitError
-	if met || !errors.As(err, &waiting) || errors.Is(err, ErrPlannerNoProgress) || calls != 2 {
+	if met || !errors.As(err, &waiting) || errors.Is(err, ErrPlannerNoProgress) || calls != 4 {
 		t.Fatalf("waiting became failure or completed: met=%v err=%v calls=%d", met, err, calls)
 	}
 	if _, err := store.AddIntent(map[string]any{"summary": "new executable fixture"}, 1, nil, "fixture"); err != nil {

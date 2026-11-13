@@ -8,13 +8,13 @@ import (
 )
 
 func refreshExecutionToolContracts(pg *db.DB) error {
-	const flag = "execution_tool_contracts_v031"
+	const flag = "execution_tool_contracts_v032"
 	if value, _, _ := pg.GetSetting(flag); value == "true" {
 		return nil
 	}
 	for _, seed := range agent.BuiltinToolSeeds() {
 		switch seed.Key {
-		case "record_verification", "list_verifications", "add_intent", "list_assets", "list_findings", "record_planner_wait":
+		case "record_verification", "list_verifications", "add_intent", "list_assets", "list_findings", "record_planner_wait", "add_exploration_goal":
 		default:
 			continue
 		}
