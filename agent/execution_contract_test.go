@@ -73,7 +73,7 @@ func TestWorkerVerificationDeliveryUsesRealReceipts(t *testing.T) {
 	}
 }
 
-func TestPlannerLookupBudgetCountsDifferentInputsAndKeepsDispatchAvailable(t *testing.T) {
+func TestPlannerDistinctLookupsCanReachRealDispatchWithinConfiguredBudget(t *testing.T) {
 	d := testDB(t)
 	defer d.Close()
 	task, err := d.CreateTask(t.Name(), "synthetic", nil, 0, 0)
@@ -82,27 +82,38 @@ func TestPlannerLookupBudgetCountsDifferentInputsAndKeepsDispatchAvailable(t *te
 	}
 	defer d.DeleteTask(task.ID)
 	store := d.Exploration(task.ExplorationID)
-	before, _ := store.PlannerProgress(t.Context())
-	g := plannerProgressGuard{store: store, before: before, continuous: true}
-	for i := 0; i < 12; i++ {
-		if blocked, _, _ := g.PreToolUse(t.Context(), "list_facts", []byte(fmt.Sprintf(`{"q":"different-%d"}`, i))); blocked {
-			t.Fatal("lookup blocked too soon")
-		}
-	}
-	if blocked, _, _ := g.PreToolUse(t.Context(), "list_assets", []byte(`{"dsl":"port==443"}`)); !blocked {
-		t.Fatal("different query bypassed decision budget")
-	}
-	if blocked, _, _ := g.PreToolUse(t.Context(), "add_intent", []byte(`{}`)); blocked {
-		t.Fatal("decision budget prevented real dispatch")
-	}
-	if _, err := store.AddNode(db.KindFact, map[string]any{"summary": "new", "evidence": "new actual observation", "confidence": "observed"}, 0, "confirmed", "fixture", nil); err != nil {
+	if _, err := store.AddGoal(map[string]any{"text": "verify independent saved material"}, "fixture"); err != nil {
 		t.Fatal(err)
 	}
-	if blocked, _, _ := g.PreToolUse(t.Context(), "node_detail", []byte(`{}`)); blocked {
-		t.Fatal("new evidence did not restore bounded lookup")
+	var facts []int64
+	for i := 0; i < 18; i++ {
+		id, err := store.AddNode(db.KindFact, map[string]any{"summary": fmt.Sprintf("local fixture %d", i), "evidence": fmt.Sprintf("saved distinct observation %d", i)}, 0, "confirmed", "fixture", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		facts = append(facts, id)
 	}
-	if err := g.validate(t.Context()); err != nil {
-		t.Fatalf("read budget reset erased actual progress: %v", err)
+	calls := 0
+	provider := plannerStateProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+		calls++
+		name := "node_detail"
+		var raw json.RawMessage
+		if calls <= 18 {
+			raw = json.RawMessage(fmt.Sprintf(`{"id":%d}`, facts[calls-1]))
+		} else if calls == 19 {
+			name = "add_intent"
+			raw = json.RawMessage(fmt.Sprintf(`{"summary":"verify independent saved synthetic observation","parent_ids":[%d]}`, facts[0]))
+		} else {
+			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("committed local dispatch")}}, "end_turn", llm.Usage{}, nil
+		}
+		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockToolUse, ID: fmt.Sprintf("fixture-%d", calls), Name: name, Input: raw}}}, "tool_use", llm.Usage{}, nil
+	}}
+	p := NewPlanner(provider, "fixture", t.TempDir(), nil, 200000, 24)
+	p.SetNonStreaming(func() bool { return true })
+	_, _, err = p.Plan(t.Context(), task.ID, nil, store, task.Goal, nil, nil)
+	progress, readErr := store.PlannerProgress(t.Context())
+	if err != nil || readErr != nil || calls != 20 || progress.ActiveIntents != 1 {
+		t.Fatalf("legitimate reads blocked dispatch: calls=%d progress=%+v errors=%v %v", calls, progress, err, readErr)
 	}
 }
 

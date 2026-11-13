@@ -8,7 +8,7 @@ import (
 )
 
 func refreshExecutionToolContracts(pg *db.DB) error {
-	const flag = "execution_tool_contracts_v032"
+	const flag = "execution_tool_contracts_v033"
 	if value, _, _ := pg.GetSetting(flag); value == "true" {
 		return nil
 	}

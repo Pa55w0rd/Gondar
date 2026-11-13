@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
@@ -25,9 +24,6 @@ type plannerProgressGuard struct {
 	wait          func() *PlannerWait
 	recoverWait   func(context.Context, PlannerWait) string
 	waitRecovered bool
-	reads         int
-	readBaseline  *db.PlannerProgress
-	mu            sync.Mutex
 }
 
 func (g *plannerProgressGuard) validate(ctx context.Context) error {
@@ -59,32 +55,10 @@ func (g *plannerProgressGuard) validate(ctx context.Context) error {
 }
 
 func (g *plannerProgressGuard) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
-	if plannerLookupTool(name) && !g.allowLookup(ctx) {
-		return true, "本轮已查阅12次且没有形成新执行或实质证据。请停止反复检索，依据已有材料提交少量具体意图；确实缺前提时保存阻塞并用record_planner_wait交接。不要猜测已覆盖或仅写待办。", nil
-	}
 	if g.inner != nil {
 		return g.inner.PreToolUse(ctx, name, input)
 	}
 	return false, "", nil
-}
-
-func (g *plannerProgressGuard) allowLookup(ctx context.Context) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.reads++
-	if g.reads <= 12 {
-		return true
-	}
-	baseline := g.before
-	if g.readBaseline != nil {
-		baseline = *g.readBaseline
-	}
-	if after, err := g.store.PlannerProgress(ctx); err == nil && (after.LatestIntent > baseline.LatestIntent || after.LatestFinding > baseline.LatestFinding || after.EvidenceAdvancedSince(baseline)) {
-		g.readBaseline = &after
-		g.reads = 1
-		return true
-	}
-	return false
 }
 
 func (g *plannerProgressGuard) PostToolUse(ctx context.Context, name string, input, result []byte, failed bool) {
@@ -107,9 +81,6 @@ func (g *plannerProgressGuard) Stop(ctx context.Context, messages []llm.Message)
 			var waiting *PlannerWaitError
 			if g.recoverWait != nil && !g.waitRecovered && errors.As(err, &waiting) {
 				g.waitRecovered, g.corrected = true, true
-				g.mu.Lock()
-				g.reads = 0
-				g.mu.Unlock()
 				return false, []string{g.recoverWait(ctx, waiting.Wait)}, ""
 			}
 			return true, nil, err.Error()
@@ -121,9 +92,6 @@ func (g *plannerProgressGuard) Stop(ctx context.Context, messages []llm.Message)
 		automatic := ""
 		if g.recoverWait != nil && !g.waitRecovered {
 			g.waitRecovered = true
-			g.mu.Lock()
-			g.reads = 0
-			g.mu.Unlock()
 			automatic = "\n\n" + g.recoverWait(ctx, PlannerWait{})
 		}
 		if g.continuous {
@@ -142,12 +110,4 @@ func (g *plannerProgressGuard) validateResult(ctx context.Context) error {
 		return fmt.Errorf("%w：本轮等待请求尚未经过自动推进复核，不能据此暂停任务", ErrPlannerNoProgress)
 	}
 	return err
-}
-
-func plannerLookupTool(name string) bool {
-	switch name {
-	case "graph_overview", "list_facts", "list_findings", "list_assets", "list_untested_assets", "list_goals", "node_detail", "get_worker_output", "get_worker_trace", "search_all_worker_traces", "list_worker_traces", "list_verifications", "expand_digest":
-		return true
-	}
-	return false
 }

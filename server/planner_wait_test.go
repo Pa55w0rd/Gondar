@@ -106,7 +106,7 @@ func TestExecutionToolUpgradePreservesDisabledAndRoleBindings(t *testing.T) {
 		}
 	}
 	agentsRaw, _ := json.Marshal(old.Agents)
-	oldFlag, hadFlag, _ := pg.GetSetting("execution_tool_contracts_v032")
+	oldFlag, hadFlag, _ := pg.GetSetting("execution_tool_contracts_v033")
 	defer func() {
 		if wasAbsent {
 			defer func() { _, _ = pg.Exec(`DELETE FROM tools WHERE key=$1`, key) }()
@@ -114,16 +114,16 @@ func TestExecutionToolUpgradePreservesDisabledAndRoleBindings(t *testing.T) {
 		_ = pg.RefreshToolDefaults(key, old.Description, old.Schema)
 		_, _ = pg.Exec(`UPDATE tools SET enabled=$2,agents=$3 WHERE key=$1`, key, old.Enabled, string(agentsRaw))
 		if hadFlag {
-			_ = pg.SetSetting("execution_tool_contracts_v032", oldFlag)
+			_ = pg.SetSetting("execution_tool_contracts_v033", oldFlag)
 		} else {
-			_, _ = pg.Exec(`DELETE FROM settings WHERE key='execution_tool_contracts_v032'`)
+			_, _ = pg.Exec(`DELETE FROM settings WHERE key='execution_tool_contracts_v033'`)
 		}
 	}()
 	_, err = pg.Exec(`UPDATE tools SET enabled=false,agents='["worker"]',schema='{}' WHERE key=$1`, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = pg.Exec(`DELETE FROM settings WHERE key='execution_tool_contracts_v032'`)
+	_, err = pg.Exec(`DELETE FROM settings WHERE key='execution_tool_contracts_v033'`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -62,9 +62,26 @@ func TestAssetLookupHasBoundedScopedPagination(t *testing.T) {
 	if excluded := page(`{"dsl":"cidr!=192.0.2.0/24"}`); excluded["total"] != float64(0) {
 		t.Fatal("CIDR exclusion used reversed containment")
 	}
-	invalid, err := tools.listAssets().Call(t.Context(), json.RawMessage(`{"dsl":"cidr=192.0.2.0/24","detail":true}`), nil)
-	if err != nil || !invalid.IsError {
-		t.Fatal("unbounded full details allowed")
+	compact := page(`{"dsl":"cidr=192.0.2.0/24","detail":true}`)
+	if compact["detail"] != false || compact["detail_note"] == "" || compact["assets"].([]any)[0].(map[string]any)["auth_available"] == nil {
+		t.Fatal("DSL detail request did not return safe compact guidance")
+	}
+	single := page(fmt.Sprintf(`{"ids":%d,"detail":true}`, ids[0]))
+	if single["count"] != float64(1) || single["assets"].([]any)[0].(map[string]any)["id"] != float64(ids[0]) {
+		t.Fatal("single ids lookup failed")
+	}
+	foreign, err := d.CreateTask(t.Name()+"-other", "synthetic", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(foreign.ID)
+	outsideID, err := as.UpsertIP(db.UpsertIPReq{IP: "198.51.100.77", TaskID: foreign.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids = append(ids, outsideID)
+	if outside := page(fmt.Sprintf(`{"ids":%d,"detail":true}`, outsideID)); outside["count"] != float64(0) {
+		t.Fatal("scalar lookup escaped task scope")
 	}
 }
 

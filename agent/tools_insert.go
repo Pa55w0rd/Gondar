@@ -565,7 +565,7 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			"dsl":    str(`DSL 查询表达式（语法/字段见工具描述）。未传 id/ids 时必须非空。`),
 			"type":   str("资产类型过滤：root_domain|ip|subdomain|app|service|endpoint（独立字段，可与 dsl 叠加；单独 type 不足以查询，仍需 dsl）"),
 			"id":     intp("直接按单个资产 id 取（可选，与 dsl/type 互斥）"),
-			"ids":    map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "直接按多个资产 id 取（可选，与 dsl/type 互斥）"},
+			"ids":    map[string]any{"anyOf": []any{map[string]any{"type": "integer", "minimum": 1}, map[string]any{"type": "array", "maxItems": 50, "items": map[string]any{"type": "integer", "minimum": 1}}}, "description": "单个正整数ID或最多50项ID数组（与dsl/type互斥），均按本任务范围校验"},
 			"limit":  intp("返回上限，默认10，最多50；按has_more/next_offset翻页"),
 			"detail": map[string]any{"type": "boolean", "description": "默认紧凑字段；明确id/ids时可设true读取完整资产详情"},
 			"offset": intp("分页偏移，默认 0（可选）"),
@@ -575,15 +575,32 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				return actool.Errorf("list_assets 未启用: AssetStore 未初始化"), nil
 			}
 			var a struct {
-				DSL    string  `json:"dsl"`
-				Type   string  `json:"type"`
-				ID     int64   `json:"id"`
-				IDs    []int64 `json:"ids"`
-				Limit  int     `json:"limit"`
-				Offset int     `json:"offset"`
-				Detail bool    `json:"detail"`
+				DSL    string          `json:"dsl"`
+				Type   string          `json:"type"`
+				ID     int64           `json:"id"`
+				IDs    json.RawMessage `json:"ids"`
+				Limit  int             `json:"limit"`
+				Offset int             `json:"offset"`
+				Detail bool            `json:"detail"`
 			}
-			_ = json.Unmarshal(in, &a)
+			if err := json.Unmarshal(in, &a); err != nil {
+				return actool.Errorf(err.Error()), nil
+			}
+			var ids []int64
+			if len(a.IDs) > 0 && string(a.IDs) != "null" {
+				if err := json.Unmarshal(a.IDs, &ids); err != nil {
+					var single int64
+					if json.Unmarshal(a.IDs, &single) != nil || single <= 0 {
+						return actool.Errorf("ids需为正整数或正整数数组"), nil
+					}
+					ids = []int64{single}
+				}
+				for _, id := range ids {
+					if id <= 0 {
+						return actool.Errorf("ids仅接受正整数"), nil
+					}
+				}
+			}
 			if a.Limit <= 0 {
 				a.Limit = 10
 			}
@@ -593,11 +610,13 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			if a.Offset < 0 {
 				a.Offset = 0
 			}
-			if len(a.IDs) > 50 {
+			if len(ids) > 50 {
 				return actool.Errorf("ids最多50项，请分批按明确编号读取"), nil
 			}
-			if a.Detail && a.ID <= 0 && len(a.IDs) == 0 {
-				return actool.Errorf("完整详情只允许明确id/ids；DSL检索返回紧凑分页"), nil
+			detailNote := ""
+			if a.Detail && a.ID <= 0 && len(ids) == 0 {
+				a.Detail = false
+				detailNote = "DSL检索返回紧凑分页；需要完整详情时请使用返回的明确id/ids读取。"
 			}
 
 			var assets []*db.Asset
@@ -606,8 +625,8 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 			switch {
 			case a.ID > 0:
 				assets, err = t.as.GetByIDsInScope(t.taskID, []int64{a.ID})
-			case len(a.IDs) > 0:
-				assets, err = t.as.GetByIDsInScope(t.taskID, a.IDs)
+			case len(ids) > 0:
+				assets, err = t.as.GetByIDsInScope(t.taskID, ids)
 			case a.DSL != "":
 				assets, err = t.as.QueryDSLInScope(a.DSL, a.Type, t.taskID, a.Limit, a.Offset)
 				if err == nil {
@@ -622,15 +641,15 @@ func (t *ToolSet) listAssets() actool.CoreTool {
 				// 「正确写法」提示，agent 才能自己纠正。
 				return actool.Errorf("DSL 错误: " + err.Error() + "\n" + dslHint(err.Error())), nil
 			}
-			if a.ID > 0 || len(a.IDs) > 0 {
+			if a.ID > 0 || len(ids) > 0 {
 				total = len(assets)
 			}
 			var result any = compactAssets(assets)
 			if a.Detail {
 				result = assets
 			}
-			more := a.ID == 0 && len(a.IDs) == 0 && a.Offset+len(assets) < total
-			return jsonResult(map[string]any{"count": len(assets), "assets": result, "total": total, "has_more": more, "next_offset": a.Offset + len(assets), "detail": a.Detail})
+			more := a.ID == 0 && len(ids) == 0 && a.Offset+len(assets) < total
+			return jsonResult(map[string]any{"count": len(assets), "assets": result, "total": total, "has_more": more, "next_offset": a.Offset + len(assets), "detail": a.Detail, "detail_note": detailNote})
 		},
 	)
 }
