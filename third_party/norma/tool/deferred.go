@@ -1,8 +1,10 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -23,6 +25,79 @@ const (
 	SearchExtraToolsName = "SearchExtraTools"
 	ExecuteExtraToolName = "ExecuteExtraTool"
 )
+
+var ErrDeferredToolUnknown = errors.New("unknown tool")
+var ErrDeferredToolLocked = errors.New("deferred tool is not unlocked")
+
+// DeferredCallResolver exposes the actual registry tool to the trusted harness,
+// so permissions/hooks run before that tool executes. Invocation identity still
+// belongs to the single outer provider call; no identity comes from params.
+type DeferredCallResolver interface {
+	ResolveDeferredCall(json.RawMessage) (CoreTool, json.RawMessage, error)
+}
+
+type deferredExecutor struct {
+	CoreTool
+	registry *Registry
+	unlock   *UnlockSet
+}
+
+func (e *deferredExecutor) ResolveDeferredCall(in json.RawMessage) (CoreTool, json.RawMessage, error) {
+	// Decode only the two documented outer fields, rejecting duplicate selectors
+	// instead of letting different parsers choose different tools/arguments.
+	if !json.Valid(in) {
+		return nil, nil, fmt.Errorf("invalid deferred call JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(in))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, nil, fmt.Errorf("deferred call must be an object")
+	}
+	fields := map[string]json.RawMessage{}
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid deferred call: %w", err)
+		}
+		name, ok := token.(string)
+		if !ok || (name != "tool_name" && name != "params") {
+			return nil, nil, fmt.Errorf("unknown deferred call field %q", name)
+		}
+		if _, duplicate := fields[name]; duplicate {
+			return nil, nil, fmt.Errorf("duplicate deferred call field %q", name)
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, nil, fmt.Errorf("invalid deferred call: %w", err)
+		}
+		fields[name] = value
+	}
+	var name string
+	if json.Unmarshal(fields["tool_name"], &name) != nil || name == "" || strings.TrimSpace(name) != name {
+		return nil, nil, fmt.Errorf("tool_name must be a nonempty exact tool name")
+	}
+	if name == ExecuteExtraToolName || name == SearchExtraToolsName {
+		return nil, nil, fmt.Errorf("nested deferred gateways are not permitted")
+	}
+	params := fields["params"]
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
+	}
+	if trimmed := bytes.TrimSpace(params); len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil, nil, fmt.Errorf("deferred params must be an object")
+	}
+	if e.registry == nil {
+		return nil, nil, fmt.Errorf("%w: %s", ErrDeferredToolUnknown, name)
+	}
+	t, ok := e.registry.Get(name)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s", ErrDeferredToolUnknown, name)
+	}
+	if e.unlock != nil && !e.unlock.Has(name) {
+		return nil, nil, fmt.Errorf("tool %s is not unlocked in this session: %w", name, ErrDeferredToolLocked)
+	}
+	return t, params, nil
+}
 
 // UnlockSet is a session-scoped, concurrency-safe set of deferred-tool names that
 // are currently callable via ExecuteExtraTool. Globally-available deferred tools
@@ -219,7 +294,8 @@ func NewSearchExtraTools(reg *Registry, deferred []string) CoreTool {
 // validated before the call. unlock may be nil (then every registry tool is
 // callable — no gating).
 func NewExecuteExtraTool(reg *Registry, unlock *UnlockSet) CoreTool {
-	return Build(Spec{
+	executor := &deferredExecutor{registry: reg, unlock: unlock}
+	executor.CoreTool = Build(Spec{
 		Name: ExecuteExtraToolName,
 		Description: "Invoke a deferred tool discovered via " + SearchExtraToolsName +
 			". tool_name is the deferred tool's exact name; params must match its schema.",
@@ -235,38 +311,22 @@ func NewExecuteExtraTool(reg *Registry, unlock *UnlockSet) CoreTool {
 					"description": "Parameters for the tool, matching its schema.",
 				},
 			},
-			"required": []any{"tool_name"},
+			"required":             []any{"tool_name"},
+			"additionalProperties": false,
 		},
 		Permissions: func(context.Context, json.RawMessage, permission.Context) permission.Decision {
 			return permission.Allowed()
 		},
 		Run: func(ctx context.Context, in json.RawMessage, tc *ToolContext) (Result, error) {
-			var args struct {
-				ToolName string          `json:"tool_name"`
-				Params   json.RawMessage `json:"params"`
-			}
-			if err := json.Unmarshal(in, &args); err != nil {
+			t, params, err := executor.ResolveDeferredCall(in)
+			if err != nil {
 				return Errorf("Error: " + err.Error()), nil
 			}
-			if args.ToolName == "" {
-				return Errorf("Error: tool_name is required"), nil
-			}
-			t, ok := reg.Get(args.ToolName)
-			if !ok {
-				return Errorf("Error: unknown tool " + args.ToolName), nil
-			}
-			if unlock != nil && !unlock.Has(args.ToolName) {
-				return Errorf("Error: tool " + args.ToolName +
-					" is not unlocked in this session — load the skill that provides it first."), nil
-			}
-			params := args.Params
-			if len(params) == 0 {
-				params = json.RawMessage("{}")
-			}
 			if err := ValidateInput(t.InputSchema(), params); err != nil {
-				return Errorf("Error: invalid params for " + args.ToolName + ": " + err.Error()), nil
+				return Errorf("Error: invalid params for " + t.Name() + ": " + err.Error()), nil
 			}
 			return t.Call(ctx, params, tc)
 		},
 	})
+	return executor
 }

@@ -7,3 +7,5 @@
 新增 `attacker_identity_test.go` 覆盖 IPv4、IPv6、DNS 与显式 SNI 优先级；Gondar 主仓的 `traffic/tls_identity_test.go` 用受控回环 HTTPS 与仅信任代理 CA 的严格客户端，验证两条真实 TLS 路径和混合并发。上游其他功能、测试和资源按 v1.9.2 保留，本轮未自动运行可能包含外部访问的上游全测试。
 
 原始 104 个文件的 SHA256 与修改范围见 Gondar 的 `gondar_change/1.3/mitmproxy-provenance.json`。来源 `AGENTS.md` 作为资料改存 `UPSTREAM_AGENTS.txt`，不会成为 Gondar 的协作指令。移除本地 replace 前，应在上游正式修复版本上运行同一回归，不能仅凭版本号删除补丁。
+
+2026-11-17：`internal/helper/proxy.go` 的 SOCKS5 连接失败路径仅在返回的连接非空时关闭，避免失败握手返回空连接后触发空指针异常。新增 `proxy_failure_test.go` 使用回环假代理拒绝握手，验证返回错误且不崩溃，不访问外部目标。本次没有整体升级依赖，原许可和版权保持原样。

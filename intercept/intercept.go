@@ -683,8 +683,9 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	if err != nil || len(rules) == 0 {
 		return Decision{}, false
 	}
+	values := inputStrings(input)
 	for _, r := range rules {
-		if ruleMatches(r, toolName, input) {
+		if ruleMatches(r, toolName, input, values) {
 			msg := r.Message
 			if msg == "" {
 				msg = defaultMessage(r.Action, r.Name)
@@ -704,20 +705,59 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	return Decision{}, false
 }
 
-func ruleMatches(r compiledRule, toolName string, input []byte) bool {
-	var subject string
+// Keep raw-JSON rules compatible, then match actual decoded string values.
+// JSON escaping must not hide newlines, Unicode, quotes or HTML characters
+// from a rule which evaluates the content the tool will actually receive.
+func ruleMatches(r compiledRule, toolName string, input []byte, values []string) bool {
 	switch r.MatchTarget {
 	case "tool_name":
-		subject = toolName
+		return r.matchString(toolName)
 	case "tool_input":
-		subject = string(input)
-	default:
-		return false
+		if r.matchString(string(input)) {
+			return true
+		}
+		for _, value := range values {
+			if r.matchString(value) {
+				return true
+			}
+		}
 	}
+	return false
+}
+
+func (r compiledRule) matchString(subject string) bool {
 	if r.MatchType == "regex" {
 		return r.re != nil && r.re.MatchString(subject)
 	}
 	return strings.Contains(subject, r.Pattern)
+}
+
+// Decode once per call, not once per rule. No concatenation between fields and
+// no second decoding of embedded strings: boundaries and literal backslashes
+// retain the same semantics as the JSON arguments consumed by the tool.
+func inputStrings(input []byte) []string {
+	var document any
+	if json.Unmarshal(input, &document) != nil {
+		return nil
+	}
+	var values []string
+	var walk func(any)
+	walk = func(value any) {
+		switch value := value.(type) {
+		case string:
+			values = append(values, value)
+		case []any:
+			for _, item := range value {
+				walk(item)
+			}
+		case map[string]any:
+			for _, item := range value {
+				walk(item)
+			}
+		}
+	}
+	walk(document)
+	return values
 }
 
 func defaultMessage(action, name string) string {

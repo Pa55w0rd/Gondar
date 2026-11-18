@@ -59,4 +59,7 @@ peers/
 # 其他
 AGENTS.md
 docs/
+!/docs/
+/docs/*
+!/docs/0.4.2-changes.md
 gondar_change/

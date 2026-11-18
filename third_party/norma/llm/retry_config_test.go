@@ -72,6 +72,7 @@ func TestDoStreamHonorsConfiguredRetries(t *testing.T) {
 	cfg := Config{
 		Format: FormatOpenAI, BaseURL: srv.URL, APIKey: "k", Model: "m",
 		MaxRetries: 1, RetryInterval: time.Millisecond,
+		HTTPClient: srv.Client(), // direct helper call does not run provider defaults
 	}
 	if _, err := doStream(context.Background(), cfg, srv.URL, []byte(`{}`), func(*http.Request) {}, "openai"); err == nil {
 		t.Fatal("want error after retries are exhausted")

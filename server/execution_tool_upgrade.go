@@ -8,28 +8,44 @@ import (
 )
 
 func refreshExecutionToolContracts(pg *db.DB) error {
-	const flag = "execution_tool_contracts_v033"
-	if value, _, _ := pg.GetSetting(flag); value == "true" {
-		return nil
+	return refreshCodeToolContracts(pg, agent.BuiltinToolSeeds())
+}
+
+func refreshCodeToolContracts(pg *db.DB, seeds []agent.ToolSeed) error {
+	// Every code-defined contract is checked at startup, including previously
+	// seeded databases. A version flag cannot silently hide a newly added field.
+	rows, err := pg.ListTools()
+	if err != nil {
+		return err
 	}
-	for _, seed := range agent.BuiltinToolSeeds() {
-		switch seed.Key {
-		case "record_verification", "list_verifications", "add_intent", "list_assets", "list_findings", "record_planner_wait", "add_exploration_goal":
-		default:
+	byKey := make(map[string]*db.Tool, len(rows))
+	for _, row := range rows {
+		byKey[row.Key] = row
+	}
+	updated := 0
+	for _, seed := range seeds {
+		row := byKey[seed.Key]
+		if row == nil || !row.System || row.Kind != "builtin" {
 			continue
 		}
-		raw, err := json.Marshal(seed.Schema)
+		var edited map[string]any
+		// A legacy/non-object JSON value has no supported annotations; repair
+		// its structure instead of abandoning the remaining catalog checks.
+		_ = json.Unmarshal(row.Schema, &edited)
+		raw, err := json.Marshal(agent.ReconcileToolSchema(seed.Schema, edited))
 		if err != nil {
 			return err
 		}
-		// Existing bindings, enable/defer flags and custom tools are preserved.
-		if err := pg.RefreshToolDefaults(seed.Key, seed.Desc, raw); err != nil {
+		changed, err := pg.RefreshToolSchema(seed.Key, row.Schema, raw)
+		if err != nil {
 			return err
 		}
+		if changed {
+			updated++
+		}
 	}
-	if err := pg.SetSetting(flag, "true"); err != nil {
-		return err
+	if updated > 0 {
+		log.Printf("[tools] 已核对并补齐%d项内置工具契约，保留启停、绑定、延迟和参数文案/有效默认值", updated)
 	}
-	log.Printf("[tools] 已同步执行、验证与分页工具契约，保留启停及角色绑定")
 	return nil
 }

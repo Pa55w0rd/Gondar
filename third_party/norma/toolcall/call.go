@@ -61,6 +61,7 @@ type Outcome struct {
 	RuleID               int64          `json:"rule_id,omitempty"`
 	OriginalInputDigest  string         `json:"original_input_digest,omitempty"`
 	EffectiveInputDigest string         `json:"effective_input_digest,omitempty"`
+	EffectiveToolName    string         `json:"effective_tool_name,omitempty"`
 	CorrectionPaths      []string       `json:"correction_paths,omitempty"`
 }
 
@@ -107,6 +108,16 @@ func IdentityFrom(ctx context.Context) (Identity, bool) {
 	return c.Identity(), true
 }
 func (c *Invocation) Identity() Identity { return c.id }
+
+// ResolveTool records only a registry-resolved host dispatch. It does not change
+// the outer provider-call identity, and cannot retarget an executing/final call.
+func (c *Invocation) ResolveTool(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.started && !c.final {
+		c.out.EffectiveToolName = name
+	}
+}
 
 // InputFacts records hashes and schema paths only; raw inputs remain in the
 // original transcript and may contain secrets. Nil paths preserve prior repair

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -121,22 +122,68 @@ func validVerificationState(state string) bool {
 	return false
 }
 
-func normalizeVerificationUpdate(in VerificationUpdate) (VerificationUpdate, string, string, error) {
-	fields := []*string{&in.Target.Endpoint, &in.Target.Method, &in.Target.Input,
-		&in.Target.Identity, &in.Target.Technique, &in.Target.Variant, &in.State,
-		&in.Summary, &in.Observation, &in.Blocker, &in.ChangeReason}
+// NormalizeVerificationTarget is shared by persistence and delivery tracking.
+// It never decodes URLs or conflates distinct identities and input variants.
+func NormalizeVerificationTarget(target VerificationTarget) (VerificationTarget, string, error) {
+	fields := []*string{&target.Endpoint, &target.Method, &target.Input, &target.Identity, &target.Technique, &target.Variant}
 	for _, field := range fields {
 		*field = verificationText(*field)
 	}
-	in.Target.Method = strings.ToUpper(in.Target.Method)
-	if in.Target.Variant == "" {
-		in.Target.Variant = "default"
+	target.Method = strings.ToUpper(target.Method)
+	if target.Variant == "" {
+		target.Variant = "default"
 	}
-	if in.Target.Endpoint == "" || in.Target.Method == "" || in.Target.Input == "" || in.Target.Identity == "" || in.Target.Technique == "" {
-		return in, "", "", fmt.Errorf("target必须明确endpoint/method/input/identity/technique；无参数或匿名身份也须使用明确标签")
+	if target.Endpoint == "" || target.Method == "" || target.Input == "" || target.Identity == "" || target.Technique == "" {
+		return target, "", fmt.Errorf("target必须明确endpoint/method/input/identity/technique；无参数或匿名身份也须使用明确标签")
 	}
-	if len(in.Target.Endpoint) > 2048 || len(in.Target.Method) > 32 || len(in.Target.Input) > 256 || len(in.Target.Identity) > 256 || len(in.Target.Technique) > 256 || len(in.Target.Variant) > 256 {
-		return in, "", "", fmt.Errorf("验证范围标签过长")
+	if len(target.Endpoint) > 2048 || len(target.Method) > 32 || len(target.Input) > 256 || len(target.Identity) > 256 || len(target.Technique) > 256 || len(target.Variant) > 256 {
+		return target, "", fmt.Errorf("验证范围标签过长")
+	}
+	identity, _ := json.Marshal(target)
+	idHash := sha256.Sum256(identity)
+	return target, "vfy_" + hex.EncodeToString(idHash[:]), nil
+}
+
+// VerificationUpdateIdentity is a business-progress identity, not a full save
+// acknowledgement: evidence reference IDs intentionally do not change progress.
+func VerificationUpdateIdentity(in VerificationUpdate) (string, string, error) {
+	_, id, digest, err := normalizeVerificationUpdate(in)
+	return id, digest, err
+}
+
+// VerificationRecordMatchesUpdate checks the complete persisted content, including
+// evidence provenance. A business-equivalent record with different references
+// must never acknowledge an invalid or unsaved update.
+func VerificationRecordMatchesUpdate(record *VerificationRecord, update VerificationUpdate) bool {
+	if record == nil || record.NodeID <= 0 || record.Revision <= 0 || record.NodeState == "dismissed" {
+		return false
+	}
+	want, id, _, err := normalizeVerificationUpdate(update)
+	if err != nil || id != record.ID {
+		return false
+	}
+	saved := VerificationUpdate{Target: record.Target, State: record.State, Summary: record.Summary, Observation: record.Observation,
+		Evidence: record.Evidence, PrerequisitesMet: record.PrerequisitesMet, Blocker: record.Blocker,
+		MissingPrerequisites: record.MissingPrerequisites, IntentID: record.IntentID, ChangeReason: record.ChangeReason, ObservedAt: record.ObservedAt}
+	if want.ObservedAt == "" {
+		saved.ObservedAt = ""
+	}
+	got, _, _, err := normalizeVerificationUpdate(saved)
+	if err != nil {
+		return false
+	}
+	want.ExpectedRevision = nil
+	return reflect.DeepEqual(want, got)
+}
+
+func normalizeVerificationUpdate(in VerificationUpdate) (VerificationUpdate, string, string, error) {
+	target, id, err := NormalizeVerificationTarget(in.Target)
+	if err != nil {
+		return in, "", "", err
+	}
+	in.Target = target
+	for _, field := range []*string{&in.State, &in.Summary, &in.Observation, &in.Blocker, &in.ChangeReason} {
+		*field = verificationText(*field)
 	}
 	if !validVerificationState(in.State) || in.Summary == "" || len(in.Summary) > 512 || len(in.Observation) > 4096 || len(in.Blocker) > 2048 || len(in.ChangeReason) > 2048 {
 		return in, "", "", fmt.Errorf("验证状态、摘要或观察字段无效或过长")
@@ -211,9 +258,6 @@ func normalizeVerificationUpdate(in VerificationUpdate) (VerificationUpdate, str
 		}
 		in.ObservedAt = observed.UTC().Format(time.RFC3339Nano)
 	}
-	identity, _ := json.Marshal(in.Target)
-	idHash := sha256.Sum256(identity)
-	id := "vfy_" + hex.EncodeToString(idHash[:])
 	// Reference IDs, producer, display title and timestamps are provenance, not
 	// new business information. Equivalent replays must not refresh progress.
 	semanticEvidence := map[string]bool{}

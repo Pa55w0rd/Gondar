@@ -1284,6 +1284,7 @@ export const api = {
       llm_profile_id?: number | null; // number=绑定；null=解绑(跟随任务/全局)；缺省=不动
       max_turns?: number;
       run_seconds?: number;
+      progress_policy?: { save_reminder_seconds: number; idle_rounds: number; idle_seconds: number };
       web_search?: boolean;
       interactive_shell?: boolean;
       local_exec?: boolean;

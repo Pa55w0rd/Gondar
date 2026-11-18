@@ -14,15 +14,15 @@ import (
 
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/toolcall"
 )
 
 // 无增量保护观察真实工具回显与已保存成果，而不是把少量未落库调用
-// 当作方向已被证伪。持续有不同成功回显的验证可继续；长时间未保存仍要
-// 做有限检查点，避免时间戳等无关输出让一次运行永远不结束。
+// 当作方向已被证伪。持续有不同成功回显的验证可继续；保存间隔只产生
+// 软提醒，不能把还在推进的工作改成空转。
 const (
 	idleStopRounds        = 8
 	idleStopMinElapsed    = 3 * time.Minute
-	idleStopSaveInterval  = 15 * time.Minute
 	idleStopOutputHistory = 64
 )
 
@@ -31,18 +31,23 @@ const WorkerReasonIdleStop harness.TerminalReason = "idle_stop"
 type idleStopper struct {
 	mu sync.Mutex
 
-	writes     func() WriteCounts
-	lastWrites int
-	start      time.Time
-	lastWrite  time.Time
-	lastChange time.Time
-	now        func() time.Time
-	rounds     int
-	nudged     bool
-	reason     string
-	seen       map[[32]byte]bool
-	order      [][32]byte
-	waiting    map[string]bool
+	writes             func() WriteCounts
+	lastWrites         int
+	start              time.Time
+	lastWrite          time.Time
+	lastChange         time.Time
+	lastReminder       time.Time
+	policy             WorkerProgressPolicy
+	checkpointReads    int
+	unsuccessfulWrites int
+	now                func() time.Time
+	rounds             int
+	nudged             bool
+	nudgedBatch        string
+	reason             string
+	seen               map[[32]byte]bool
+	order              [][32]byte
+	waiting            map[string]bool
 }
 
 func newIdleStopper(writes func() WriteCounts) *idleStopper {
@@ -50,6 +55,7 @@ func newIdleStopper(writes func() WriteCounts) *idleStopper {
 	return &idleStopper{
 		writes: writes, start: now, lastWrite: now, lastChange: now,
 		now: time.Now, seen: make(map[[32]byte]bool), waiting: make(map[string]bool),
+		policy: DefaultWorkerProgressPolicy(),
 	}
 }
 
@@ -60,7 +66,11 @@ func (s *idleStopper) refreshLocked() bool {
 	}
 	s.lastWrites = total
 	s.rounds, s.nudged, s.reason = 0, false, ""
+	s.nudgedBatch = ""
+	s.checkpointReads = 0
+	s.unsuccessfulWrites = 0
 	s.lastWrite, s.lastChange = s.now(), s.now()
+	s.lastReminder = time.Time{}
 	return true
 }
 
@@ -73,13 +83,11 @@ func (s *idleStopper) totalLocked() int {
 
 func (s *idleStopper) neededLocked() (bool, string) {
 	now := s.now()
-	if now.Sub(s.start) < idleStopMinElapsed {
+	grace := time.Duration(s.policy.IdleSeconds) * time.Second
+	if now.Sub(s.start) < grace {
 		return false, ""
 	}
-	if now.Sub(s.lastWrite) >= idleStopSaveInterval {
-		return true, "持续验证尚未保存检查点；本轮已有成果与未验证步骤需要先写回"
-	}
-	if s.rounds >= idleStopRounds && now.Sub(s.lastChange) >= idleStopMinElapsed {
+	if s.rounds >= s.policy.IdleRounds && now.Sub(s.lastChange) >= grace {
 		return true, fmt.Sprintf("连续%d次调用没有新的成功回显或已保存成果；需要保存检查点并核对阻塞", s.rounds)
 	}
 	return false, ""
@@ -110,8 +118,8 @@ func (s *idleStopper) advance() {
 	}
 }
 
-// observe 只把实际成功且不同的回显作为短期探索进展。保存检查点仍有
-// 独立的有界间隔；不把模型的草稿、工具参数改写或工具错误当成成果。
+// observe 只把实际成功且不同的回显作为短期探索进展；不把模型的草稿、
+// 工具参数改写、单纯时间戳变化或工具错误当成成果。
 func (s *idleStopper) observe(name string, input, result []byte, failed bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,11 +146,11 @@ func (s *idleStopper) observe(name string, input, result []byte, failed bool) {
 			}
 		}
 	}
-	if failed || text == "" || name == "TodoWrite" || name == "Sleep" {
+	if failed || text == "" || name == "TodoWrite" || strings.EqualFold(name, "sleep") {
 		s.rounds++
 		return
 	}
-	key := sha256.Sum256([]byte(name + "\x00" + text))
+	key := sha256.Sum256([]byte(name + "\x00" + idleProgressText(text)))
 	if s.seen[key] {
 		s.rounds++
 		return
@@ -154,10 +162,42 @@ func (s *idleStopper) observe(name string, input, result []byte, failed bool) {
 		s.order = s.order[1:]
 	}
 	s.rounds = 0
+	s.unsuccessfulWrites = 0
+	s.nudged, s.reason, s.checkpointReads = false, "", 0
+	s.nudgedBatch = ""
 	s.lastChange = s.now()
 }
 
+// Existing-material reads remain available during a real no-progress checkpoint,
+// but repeated reads still consume the configured no-progress allowance.
+func (s *idleStopper) allowCheckpointRead(name string) bool {
+	if !plannerCheckpointTools[name] || idleStopWriteTools[name] {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.checkpointReads >= s.policy.IdleRounds {
+		return false
+	}
+	s.checkpointReads++
+	return true
+}
+
+func (s *idleStopper) canSave() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.refreshLocked()
+	return s.unsuccessfulWrites < s.policy.IdleRounds
+}
+
 var idleBackgroundTask = regexp.MustCompile(`(?:Running in background as |moved to background as )(task_[A-Za-z0-9_-]+)`)
+
+var idleVolatileTime = regexp.MustCompile(`\b\d{4}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?\b`)
+var idleHTTPDate = regexp.MustCompile(`(?im)^date:\s*[^\r\n]+`)
+
+func idleProgressText(text string) string {
+	return idleVolatileTime.ReplaceAllString(idleHTTPDate.ReplaceAllString(text, "Date: <clock>"), "<clock>")
+}
 
 // A running task is real work, not a request to fabricate a fact. Poll it with
 // a bounded blocking read; the configured run/task deadline remains effective.
@@ -184,12 +224,27 @@ func (s *idleStopper) waitInput(name string, input []byte) ([]byte, bool) {
 
 // request 返回是否已提醒过。计数独立于 PostToolUse：被 PreToolUse 拦截
 // 的调用不会进入 PostToolUse，因此不能靠后置钩子推进取消阶段。
-func (s *idleStopper) request(reason string) bool {
+func (s *idleStopper) request(reason string, batches ...string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	batch := ""
+	if len(batches) > 0 {
+		batch = batches[0]
+	}
+	if s.nudged && batch != "" && batch == s.nudgedBatch {
+		return false
+	}
 	already := s.nudged
 	s.nudged, s.reason = true, reason
+	s.nudgedBatch = batch
 	return already
+}
+
+func idlePromptBatch(ctx context.Context) string {
+	if id, ok := toolcall.IdentityFrom(ctx); ok && id.Valid() {
+		return fmt.Sprintf("%s:%s:%d", id.RunID, id.PromptID, id.Turn)
+	}
+	return ""
 }
 
 func (s *idleStopper) pending() (bool, string) {
@@ -231,7 +286,7 @@ func (h *idleStopHooks) PreToolUse(ctx context.Context, name string, input []byt
 			updatedInput = updated
 		}
 	}
-	if ctx.Err() != nil || idleStopWriteTools[name] {
+	if ctx.Err() != nil || (idleStopWriteTools[name] && h.stop.canSave()) {
 		return false, "", updatedInput
 	}
 	probeInput := input
@@ -245,7 +300,10 @@ func (h *idleStopHooks) PreToolUse(ctx context.Context, name string, input []byt
 	if !needed {
 		return false, "", updatedInput
 	}
-	if h.stop.request(reason) {
+	if h.stop.allowCheckpointRead(name) {
+		return false, "", updatedInput
+	}
+	if h.stop.request(reason, idlePromptBatch(ctx)) {
 		h.finish(ctx, reason)
 		return true, idleStopMessage + "（保护已停止本轮，已保存成果保留。）", nil
 	}
@@ -259,7 +317,10 @@ func (h *idleStopHooks) PostToolUse(ctx context.Context, name string, input, res
 	if idleStopWriteTools[name] {
 		// 只有真实成功写入导致 WriteCounts 增长才会清除提醒。
 		h.stop.mu.Lock()
-		h.stop.refreshLocked()
+		if !h.stop.refreshLocked() {
+			h.stop.rounds++
+			h.stop.unsuccessfulWrites++
+		}
 		h.stop.mu.Unlock()
 		return
 	}
@@ -316,7 +377,7 @@ var idleStopWriteTools = map[string]bool{
 	"record_verification": true,
 }
 
-const idleStopMessage = "本轮需要保存检查点：近期没有新的成功回显或已到保存间隔，这不表示该方向已安全或没有价值。请停止新的探测，把已确认观察、负结果及未完成步骤用 record_fact 保存，确认漏洞用 report_finding，已有证据用 save_evidence；随后说明具体阻塞或可续探步骤。不要为通过保护编造事实。保存真实新增后可继续本意图；没有新增则结束本轮，保留未验证范围。"
+const idleStopMessage = "本轮触发防空转检查点：连续调用没有新的成功回显或已保存成果，这不表示该方向已安全或没有价值。请停止重复探测，读取已有材料并用 record_fact 保存真实观察，确认漏洞用 report_finding，已有文件直接用 save_evidence 登记；随后说明具体阻塞或可续探步骤。不要为通过保护编造事实。保存真实新增后可继续本意图；没有新增则结束本轮，保留未验证范围。"
 
 func logIdleStop(worker string, taskID, intentID int64, reason string) {
 	log.Printf("[worker %s] task %d intent #%d 无增量检查点保护: %s", worker, taskID, intentID, reason)

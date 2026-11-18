@@ -58,6 +58,10 @@ func TestDSLOrCannotBypassTaskTypeOrDeclaredScope(t *testing.T) {
 	}
 	t.Run("declared_scope_applies_to_whole_or", func(t *testing.T) {
 		for _, typ := range []string{"", "subdomain"} {
+			count, err := av.CountDSLInScope(dsl, typ, one.ID)
+			if err != nil || count != 1 {
+				t.Fatalf("scope count type=%q count=%d err=%v", typ, count, err)
+			}
 			assets, err := av.QueryDSLInScope(dsl, typ, one.ID, 50, 0)
 			if err != nil || len(assets) != 1 || assets[0].ID != want {
 				t.Fatalf("scope query type=%q assets=%+v err=%v", typ, assets, err)

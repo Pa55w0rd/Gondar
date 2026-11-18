@@ -423,7 +423,10 @@ func buildDSLWhereBase(node *astNode, base int) (string, []any, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return clause, b.args, nil
+	// Callers already group the result before adding scope/type filters. Keep
+	// that invariant at the builder boundary too, so future callers can safely
+	// append AND predicates to an expression whose root is OR.
+	return "(" + clause + ")", b.args, nil
 }
 
 // ── helpers (shared with parser) ─────────────────────────────────────────────

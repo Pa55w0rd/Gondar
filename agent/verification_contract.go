@@ -50,7 +50,7 @@ func verificationRepairResult(state string, err error) actool.Result {
 	result, _ := jsonResult(map[string]any{
 		"saved": false, "state_unchanged": true, "receipt_type": "verification",
 		"error": fmt.Sprintf("验证记录未更改：%v", err), "required_evidence_roles": roles,
-		"repair": "每项evidence只填一种真实来源：record_fact返回的id填node_id；save_evidence返回的id填artifact_id；活动详情返回的活动编号才填activity_id。意图ID不能充当活动ID。修正缺失字段后重试一次；证据不足时用inconclusive或missing_prerequisite，不编造基线、对照或编号。只有saved=true或查询到对应修订才可称记账成功。",
+		"repair": "每项evidence只填一种真实来源：record_fact返回的id填node_id；save_evidence返回的id填artifact_id；活动详情返回的活动编号才填activity_id。意图ID不能充当活动ID。按具体错误增量修正；修订冲突先用list_verifications读取最新证据及revision再合并，不强盖旧证据。证据不足时用inconclusive或missing_prerequisite，不编造基线、对照或编号。只有saved=true或查询到与本次内容一致的修订才可称记账成功。相同错误没有变化时交接，不循环猜参数。",
 	})
 	result.IsError = true
 	return result
@@ -58,5 +58,5 @@ func verificationRepairResult(state string, err error) actool.Result {
 
 const verificationReceiptGuidance = `
 
-【验证与交付回执】record_verification失败表示未保存，不能在总结中称已登记、阴性闭环或全部覆盖。record_fact的id是node_id，附件id是artifact_id，只有实际活动详情编号才是activity_id，三类编号不能互换。negative需要前提有效及baseline/test/control，confirmed另需真实impact；没有这些材料就如实记inconclusive、blocked或missing_prerequisite。错误只修正一次，不循环猜参数。总结引用真实保存编号和仍未验证步骤；已有证据可继续增量处理，不能因done、零产出或旧目标met扩大阴性范围。
+【验证与交付回执】record_verification失败表示未保存，不能在总结中称已登记、阴性闭环或全部覆盖。record_fact的id是node_id，附件id是artifact_id，只有实际活动详情编号才是activity_id，三类编号不能互换。negative需要前提有效及baseline/test/control，confirmed另需真实impact；没有这些材料就如实记inconclusive、blocked或missing_prerequisite。在配置的收尾预算内按实际错误增量修正，版本冲突先读取最新记录并保留旧证据，相同错误没有变化时交接，不循环猜参数。总结引用真实保存编号和仍未验证步骤；已有证据可继续增量处理，不能因done、零产出或旧目标met扩大阴性范围。
 `

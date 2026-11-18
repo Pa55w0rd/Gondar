@@ -11,11 +11,40 @@ import (
 
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/toolcall"
 )
 
 type fakeWrites struct {
 	mu sync.Mutex
 	w  WriteCounts
+}
+
+func TestParallelCallsInOneModelTurnCannotSkipSaveOpportunity(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	h := wrapIdleStop(nil, (&fakeWrites{}).get, nil, cancel)
+	ageStopper(h.stop, time.Hour)
+	id := toolcall.Identity{Version: toolcall.Version, RunID: "run", PromptID: "prompt", InvocationID: "one", ToolUseID: "provider-one", Turn: 3}
+	batch := toolcall.WithInvocation(ctx, toolcall.New(id))
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Go(func() {
+			if block, _, _ := h.PreToolUse(batch, "Probe", nil); !block {
+				t.Error("无进展探测应被提醒拦截")
+			}
+		})
+	}
+	wg.Wait()
+	if ctx.Err() != nil {
+		t.Fatal("同一模型回合并发调用直接跳到终止，模型没有机会保存")
+	}
+	id.Turn = 4
+	id.InvocationID = "next"
+	id.ToolUseID = "provider-next"
+	h.PreToolUse(toolcall.WithInvocation(ctx, toolcall.New(id)), "Probe", nil)
+	if !errors.Is(context.Cause(ctx), AbortIdleStop) {
+		t.Fatal("下一回合仍无进展时保护失效")
+	}
 }
 
 func (f *fakeWrites) get() WriteCounts {
@@ -34,6 +63,7 @@ func ageStopper(s *idleStopper, elapsed time.Duration) {
 	defer s.mu.Unlock()
 	earlier := s.now().Add(-elapsed)
 	s.start, s.lastWrite, s.lastChange = earlier, earlier, earlier
+	s.rounds = s.policy.IdleRounds
 }
 
 type idleClock struct {
@@ -64,9 +94,15 @@ func TestIdleStopDifferentSuccessOutputKeepsLongVerification(t *testing.T) {
 	if s.totalLocked() != 0 {
 		t.Fatal("工具回显不能伪造已保存成果")
 	}
-	c.add(idleStopSaveInterval)
-	if stop, reason := s.peek(); !stop || !strings.Contains(reason, "检查点") {
-		t.Fatalf("长期未保存仍须有界检查点：stop=%v reason=%s", stop, reason)
+	c.add(15 * time.Minute)
+	if stop, reason := s.peek(); stop {
+		t.Fatalf("仅未保存不能终止有效验证：reason=%s", reason)
+	}
+	if reminder := s.saveReminder(); reminder == "" || !strings.Contains(reminder, "不暂停") {
+		t.Fatal("应给出不阻断的保存提醒")
+	}
+	if s.saveReminder() != "" {
+		t.Fatal("同一间隔不能反复提醒")
 	}
 }
 
@@ -204,7 +240,32 @@ func TestIdleStopRunningTaskUsesBoundedWaitWithoutInventingFacts(t *testing.T) {
 		t.Fatal("等待不能冒充事实")
 	}
 	h.PostToolUse(t.Context(), "TaskOutput", []byte(`{"task_id":"task_1"}`), []byte(`"[task task_1 | completed | exit 0]\n"`), false)
-	if block, _, _ := h.PreToolUse(t.Context(), "TaskOutput", []byte(`{"task_id":"task_1"}`)); !block {
-		t.Fatal("已经结束的后台任务不能无限豁免保存检查点")
+	if block, _, updated := h.PreToolUse(t.Context(), "TaskOutput", []byte(`{"task_id":"task_1"}`)); block || len(updated) > 0 {
+		t.Fatal("结束回执应恢复正常工具调用，不能因旧保存间隔阻断")
+	}
+}
+
+func TestIdleStopTimestampChangesDoNotConcealRepeatedOutput(t *testing.T) {
+	s := newIdleStopper((&fakeWrites{}).get)
+	c := useIdleClock(s)
+	for i := 0; i <= idleStopRounds; i++ {
+		c.add(time.Minute)
+		s.observe("Bash", nil, []byte(fmt.Sprintf("2026-11-17T10:%02d:00Z\nunchanged", i)), false)
+	}
+	if stop, _ := s.peek(); !stop {
+		t.Fatal("只有时钟变化不应重置空转计数")
+	}
+}
+
+func TestIdleStopCheckpointAllowsBoundedMaterialReads(t *testing.T) {
+	h := wrapIdleStop(nil, (&fakeWrites{}).get, nil)
+	ageStopper(h.stop, time.Hour)
+	for i := 0; i < h.stop.policy.IdleRounds; i++ {
+		if block, _, _ := h.PreToolUse(t.Context(), "Read", []byte(`{"file_path":"existing.txt"}`)); block {
+			t.Fatal("整理已存材料被阻断")
+		}
+	}
+	if block, _, _ := h.PreToolUse(t.Context(), "Read", []byte(`{"file_path":"existing.txt"}`)); !block {
+		t.Fatal("材料读取不能无限绕过真正空转")
 	}
 }

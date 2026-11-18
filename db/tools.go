@@ -104,6 +104,20 @@ func (d *DB) RefreshToolDefaults(key, desc string, schema json.RawMessage) error
 	return err
 }
 
+// RefreshToolSchema updates only a built-in's structural contract. The compare
+// guards concurrent UI edits; all descriptions, bindings, flags and executable
+// specifications remain untouched. Runtime assembly also reconciles the schema
+// against code, so losing this compare never exposes an obsolete contract.
+func (d *DB) RefreshToolSchema(key string, previous, schema json.RawMessage) (bool, error) {
+	result, err := d.Exec(`UPDATE tools SET schema=$3, updated_at=now()
+WHERE key=$1 AND system AND kind='builtin' AND schema=$2::jsonb AND schema IS DISTINCT FROM $3::jsonb`, key, previous, schema)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count > 0, err
+}
+
 func scanTool(rows interface{ Scan(...any) error }) (*Tool, error) {
 	var t Tool
 	var agents []byte

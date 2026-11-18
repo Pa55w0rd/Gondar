@@ -4,6 +4,7 @@ import (
 	"errors"
 
 	"gondar/db"
+	"gondar/filepreview"
 )
 
 // Optional host capability: only the Worker instance supplies this intent ID.
@@ -25,7 +26,25 @@ func artifactRecorderForIntent(inner ArtifactRecorder, taskID, intentID int64) A
 	if inner == nil {
 		return nil
 	}
-	return intentArtifactRecorder{inner: inner, taskID: taskID, intentID: intentID}
+	recorder := intentArtifactRecorder{inner: inner, taskID: taskID, intentID: intentID}
+	if previewer, ok := inner.(ArtifactPreviewer); ok {
+		return intentArtifactPreviewRecorder{intentArtifactRecorder: recorder, previewer: previewer}
+	}
+	return recorder
+}
+
+// Optional capabilities survive the provenance wrapper only when the underlying
+// host really provides them. The host retains artifact ownership/path/size checks.
+type intentArtifactPreviewRecorder struct {
+	intentArtifactRecorder
+	previewer ArtifactPreviewer
+}
+
+func (r intentArtifactPreviewRecorder) PreviewArtifactContent(taskID, artifactID int64, entry string) (*filepreview.Preview, error) {
+	if taskID != r.taskID || taskID <= 0 || r.intentID <= 0 {
+		return nil, errors.New("证据预览缺少当前任务的真实执行意图")
+	}
+	return r.previewer.PreviewArtifactContent(taskID, artifactID, entry)
 }
 
 func (r intentArtifactRecorder) RecordArtifact(taskID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, error) {

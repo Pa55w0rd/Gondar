@@ -3,7 +3,6 @@ package agent
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,7 +90,8 @@ type Worker struct {
 	noaEnabledFn func() bool
 	// maxTokensFn resolves the per-reply output cap in tokens, on the same
 	// per-run basis. nil or 0 = send no cap and let the endpoint decide.
-	maxTokensFn func() int
+	maxTokensFn    func() int
+	progressPolicy func() WorkerProgressPolicy
 }
 
 // WorkerSessionID returns the stable transcript key used by a worker intent.
@@ -409,7 +409,54 @@ func resumeBrief(ts *db.ExplorationStore, intent *db.Node) string {
 	if n == 0 {
 		b.WriteString("\n- 无（上次零写回——先复盘上次卡在哪一步，别重复同样的路径）")
 	}
+	b.WriteString(verificationResumeHandoff(ts, intent.ID))
 	return b.String()
+}
+
+func verificationResumeHandoff(ts *db.ExplorationStore, intentID int64) string {
+	if ts == nil {
+		return ""
+	}
+	record, err := ts.LatestWorkerResult(intentID)
+	if err != nil || record == nil {
+		return ""
+	}
+	var metadata map[string]json.RawMessage
+	_ = json.Unmarshal(record.Metadata, &metadata)
+	raw := metadata["verification_delivery"]
+	if len(raw) > 0 {
+		var public map[string]json.RawMessage
+		if json.Unmarshal(raw, &public) == nil {
+			delete(public, "pending_inputs")
+			raw, _ = json.Marshal(public)
+		}
+	}
+	legacy := ""
+	if len(raw) == 0 {
+		// Old releases kept this handoff in the result body. It is context for
+		// reconciliation, never authority to acknowledge a new save.
+		if detail, err := ts.ActivityDetail(record.ID); err == nil {
+			marker := "宿主保存回执核对（以此及实际工具结果为准）："
+			if at := strings.LastIndex(detail, marker); at >= 0 {
+				candidate := []byte(strings.TrimSpace(detail[at+len(marker):]))
+				var summary struct {
+					Unresolved int `json:"unresolved_verification_writes"`
+				}
+				if json.Unmarshal(candidate, &summary) == nil && summary.Unresolved > 0 {
+					raw = candidate
+					legacy = "（旧版文本交接，编号及保存状态须重新核对）"
+				}
+			}
+		}
+	}
+	if len(raw) == 0 {
+		return ""
+	}
+	text := string(raw)
+	if len([]rune(text)) > 6000 {
+		text = string([]rune(text)[:6000]) + "（仅注入部分；按稳定编号查询账本核对）"
+	}
+	return "\n上次宿主保存核对（已有数据，只读交接，不是新执行回执）" + legacy + "：\n" + text + "\n先查 list_verifications 核对当前修订；已保存部分不重做，仅修正未完成记录。保存失败不表示目标操作从未执行。"
 }
 
 // workerToolOutputChars 是 worker 单次工具回显的上限（字符）。超长输出由 SDK
@@ -599,8 +646,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// 心跳，worker 死活要靠翻 transcripts/*.jsonl 的 mtime 才确认得到。日志层套在
 		// 拦截链外侧（先记后转发），纯旁路不影响 steer/拦截决策。
 		//
-		// 最外层再套一层 idleStop：连续多轮无写回就要求收场。判据是产出率而不是
-		// 时长——持续产出的 worker 不会被它打断（深度探索不受影响），空转的会被收。
+		// idleStop 仅处理连续无实质变化；未保存到一定间隔由软提醒处理。
 		// 详见 agent/idlestop.go 的注释。
 		logged := wrapToolLog(hooks, KindWorker, fmt.Sprintf("%s · #%d", name, intent.ID))
 		idleHooks = wrapIdleStop(logged, tsx.Writes, func(reason string) {
@@ -611,7 +657,46 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 			logIdleStop(name, taskID, intent.ID, reason)
 		}, stopRun)
 	}
-	delivery := &verificationDeliveryGuard{inner: idleHooks}
+	idleHooks.stop.policy = w.resolveProgressPolicy()
+	if emit != nil {
+		id := intent.ID
+		callLimit := w.runTimeout
+		if callLimit <= 0 {
+			callLimit = defaultModelCallTimeout
+		}
+		if opts.MaxDuration > 0 && opts.MaxDuration < callLimit {
+			callLimit = opts.MaxDuration
+		}
+		budget, _ := json.Marshal(map[string]any{
+			"configured_run_seconds": w.runTimeout.Seconds(), "effective_run_seconds": opts.MaxDuration.Seconds(),
+			"task_deadline_binds": clamped, "task_deadline_unix": taskClockFrom(ctx).DeadlineUnix,
+			"model_call_limit_seconds": callLimit.Seconds(), "settlement_max_turns": settle.MaxTurns,
+			"progress_policy": idleHooks.stop.policy,
+		})
+		emit(db.Activity{Kind: "info", NodeID: &id, Worker: name, Summary: "本轮实际运行预算与保护配置", Detail: string(budget)})
+	}
+	opts.Provider = &progressReminderProvider{inner: opts.Provider, stop: idleHooks.stop, onReminder: func(text string) {
+		if emit != nil {
+			id := intent.ID
+			emit(db.Activity{Kind: "info", NodeID: &id, Worker: name, Summary: "保存提醒（本轮继续执行）", Detail: text})
+		}
+	}}
+	delivery := &verificationDeliveryGuard{inner: idleHooks, maxCorrections: resolveWrapupTurns("worker"), ownerIntentID: intent.ID, lookup: func(ctx context.Context, id string) (*db.VerificationRecord, error) {
+		page, err := tsx.ts.ListVerifications(ctx, db.VerificationFilter{ID: id, Limit: 1})
+		if err != nil || page == nil || len(page.Cases) == 0 {
+			return nil, err
+		}
+		return page.Cases[0], nil
+	}}
+	if previous, readErr := tsx.ts.LatestWorkerResult(intent.ID); readErr != nil {
+		return harness.ReasonCompleted, tsx.Writes(), fmt.Errorf("读取保存交接失败：%w", readErr)
+	} else if previous != nil {
+		var metadata map[string]json.RawMessage
+		_ = json.Unmarshal(previous.Metadata, &metadata)
+		if string(metadata["activity_origin"]) != `"archive_material"` {
+			delivery.restore(metadata["verification_delivery"])
+		}
+	}
 	opts.Hooks = delivery
 	if w.tx != nil { // persist raw LLM conversation; one file per worked intent
 		opts.Transcript = w.tx
@@ -620,10 +705,24 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	intentID := intent.ID
 	emitWrap := func(r db.Activity) {
 		if r.Kind == "result" {
-			r.Detail += delivery.receiptSummary()
-			if delivery.pendingCount() > 0 {
+			snapshot := delivery.snapshot()
+			if len(snapshot.Summary) > 0 {
+				r.Detail += "\n\n宿主保存回执核对（以此及实际工具结果为准）：" + string(snapshot.Summary)
+			}
+			if raw := snapshot.Persisted; len(raw) > 0 {
+				var metadata map[string]json.RawMessage
+				_ = json.Unmarshal(r.Metadata, &metadata)
+				if metadata == nil {
+					metadata = map[string]json.RawMessage{}
+				}
+				metadata["verification_delivery"] = raw
+				r.Metadata, _ = json.Marshal(metadata)
+			}
+			if snapshot.Unresolved > 0 {
+				if !r.IsError {
+					r.Summary += "；部分验证保存尚未完成，已有成果保留"
+				}
 				r.IsError = true
-				r.Summary = "验证记账交付尚未完成，已保留实际成果"
 			}
 		}
 		if emit != nil {
@@ -643,7 +742,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	noaSession := WorkerSessionID(ts.ID(), intent.ID)
 	enableNoa(&opts, w.noaEnabledFn, w.workDir, noaSession, noaWarn(noaSession))
 	ctx = attachSideCapture(ctx, &opts)
-	ctx = withModelCallLimit(ctx, opts.MaxDuration)
+	ctx = withModelCallLimit(ctx, w.runTimeout)
 	s := agentcore.NewSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 
@@ -663,6 +762,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		} else if len(s.Messages()) > 0 {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)
 		}
+	}
+	if message == "" && (w.tx == nil || len(s.Messages()) == 0) {
+		input += verificationResumeHandoff(ts, intent.ID)
 	}
 	if message != "" {
 		if alreadyRecorded {
@@ -684,8 +786,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// pause / planner kill / shutdown, which the engine distinguishes and re-queues/stops.
 	_, reason, err := captureRunSession(ctx, s, input, emitWrap)
 	reason, err = workerIdleOutcome(parentCtx, ctx, idleHooks, reason, err)
-	if parentCtx.Err() == nil && delivery.pendingCount() > 0 {
-		err = errors.Join(ErrVerificationDelivery, err)
+	if parentCtx.Err() == nil && delivery.pendingCount() > 0 && err == nil && (reason == harness.ReasonCompleted || reason == harness.ReasonStopHookPrevented || reason == harness.ReasonHookStopped) {
+		err = ErrVerificationDelivery
 	}
 	return reason, tsx.Writes(), err
 }

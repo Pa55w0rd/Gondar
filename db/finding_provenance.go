@@ -153,7 +153,7 @@ func validateFindingProvenanceTx(ctx context.Context, tx *sql.Tx, in RecordFindi
 			if err != nil {
 				return nil, err
 			}
-			if failed || (kind != "tool_result" && kind != "tool_late_result") || strings.TrimSpace(detail) == "" || !findingRuntimeProofTool(name) {
+			if failed || (kind != "tool_result" && kind != "tool_late_result") || strings.TrimSpace(detail) == "" {
 				return nil, incompleteFinding("模型文字、查询列表、草稿或失败结果不能作为实际影响原件")
 			}
 			if in.IntentID > 0 && intent.Valid && intent.Int64 != in.IntentID {
@@ -165,7 +165,21 @@ func validateFindingProvenanceTx(ctx context.Context, tx *sql.Tx, in RecordFindi
 				Outcome  toolcall.Outcome  `json:"tool_outcome"`
 			}
 			_ = json.Unmarshal(metadata, &m)
-			runtime := m.Origin == "runtime" && m.Identity.Valid() && m.Identity == m.Outcome.Identity && m.Identity.ToolUseID == toolUseID && m.Identity.ToolName == name && m.Outcome.ExecutionState == toolcall.Executed && m.Outcome.Kind == toolcall.ExecutedSuccess && ((kind == "tool_result" && m.Outcome.Phase == "result") || (kind == "tool_late_result" && m.Outcome.Phase == "late_receipt"))
+			trustedReceipt := m.Identity.Valid() && m.Identity == m.Outcome.Identity && m.Identity.ToolUseID == toolUseID && m.Identity.ToolName == name && m.Outcome.ExecutionState == toolcall.Executed && m.Outcome.Kind == toolcall.ExecutedSuccess && ((kind == "tool_result" && m.Outcome.Phase == "result") || (kind == "tool_late_result" && m.Outcome.Phase == "late_receipt"))
+			proofTool := name
+			if name == "ExecuteExtraTool" {
+				// A gateway is not itself an external operation. Only the host's
+				// typed result may identify its actual tool; never parse model
+				// arguments/output to turn a local lookup into impact evidence.
+				if !trustedReceipt {
+					return nil, incompleteFinding("延迟工具回执缺少可信的实际工具身份；保留材料，不能自动作为外部执行或影响证明")
+				}
+				proofTool = m.Outcome.EffectiveToolName
+			}
+			if !findingRuntimeProofTool(proofTool) {
+				return nil, incompleteFinding("本地读取、模型记账或未识别的延迟包装不能作为实际影响原件")
+			}
+			runtime := m.Origin == "runtime" && trustedReceipt
 			// Selecting material cannot launder a known host denial, partial or
 			// unknown execution into proof. The compatibility path is for old
 			// successful raw receipts that predate trusted metadata.
@@ -257,7 +271,7 @@ func provenanceReplayJSON(p *FindingProvenance) []byte {
 
 func findingRuntimeProofTool(name string) bool {
 	switch name {
-	case "Write", "Edit", "NotebookEdit", "Read", "Glob", "Grep", "TodoWrite", "ToolSearch", "WebSearch", "web_search", "SearchFetch", "traffic_search", "traffic_get", "graph_overview", "node_detail", "get_task_node_detail", "report_finding", "save_evidence":
+	case "Write", "Edit", "NotebookEdit", "Read", "Glob", "Grep", "TodoWrite", "ToolSearch", "WebSearch", "web_search", "SearchFetch", "SearchExtraTools", "ExecuteExtraTool", "traffic_search", "traffic_get", "graph_overview", "node_detail", "get_task_node_detail", "report_finding", "save_evidence":
 		return false
 	case "add_exploration_goal", "record_planner_wait", "retire_open_intents", "frontend_inventory",
 		"list_intents", "list_findings", "list_facts", "list_goals", "list_assets", "list_untested_assets", "asset_neighbors",

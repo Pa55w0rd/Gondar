@@ -17,13 +17,13 @@ const (
 )
 
 // summarySystemPrompt is the summarizer's system prompt (== claude-code
-// streamCompactSummary fallback path). Thinking is disabled and no tools are
-// offered; the no-tools guardrails live in the user prompt (§7).
+// streamCompactSummary fallback path). No tools are offered; the no-tools
+// guardrails live in the user prompt (§7). Reasoning follows provider config.
 const summarySystemPrompt = "You are a helpful AI assistant tasked with summarizing conversations."
 
 // ProviderSummarizer builds a Summarizer backed by an llm.Provider. It replays
 // the real conversation messages (not a rendered text transcript) followed by the
-// summary-request user message, with thinking disabled and output capped at
+// summary-request user message, inheriting provider reasoning and output capped at
 // min(20000, maxOutputTokens). It retries transient stream failures
 // (MAX_COMPACT_STREAMING_RETRIES) and, if the summary request itself overflows,
 // drops the oldest API-round groups and retries (MAX_PTL_RETRIES).
@@ -65,7 +65,6 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 		System:    []string{summarySystemPrompt},
 		Messages:  reqMsgs,
 		MaxTokens: maxOut,
-		Thinking:  "disabled",
 	}
 	var lastErr error
 	for range maxStreamingRetries {

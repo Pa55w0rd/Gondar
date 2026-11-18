@@ -357,11 +357,12 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	// only trigger_* fields) leaves the untouched settings alone instead of resetting
 	// max_turns/run_seconds to 0.
 	var req struct {
-		MaxTurns         *int  `json:"max_turns"`
-		RunSeconds       *int  `json:"run_seconds"`
-		WebSearch        *bool `json:"web_search"`
-		InteractiveShell *bool `json:"interactive_shell"`
-		LocalExec        *bool `json:"local_exec"`
+		MaxTurns         *int                        `json:"max_turns"`
+		RunSeconds       *int                        `json:"run_seconds"`
+		WebSearch        *bool                       `json:"web_search"`
+		InteractiveShell *bool                       `json:"interactive_shell"`
+		LocalExec        *bool                       `json:"local_exec"`
+		ProgressPolicy   *agent.WorkerProgressPolicy `json:"progress_policy"`
 		// llm_profile_id 三态:字段缺省=不动;显式 null=解绑(跟随任务/全局);数字=绑定该 profile。
 		LLMProfileID json.RawMessage `json:"llm_profile_id"`
 		// P3 触发后处理策略(三者一起可选,提供任一即整体写入;未提供则不动)。
@@ -372,6 +373,16 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.ProgressPolicy != nil {
+		if a.Key != "worker" {
+			writeErr(w, 400, "保存提醒与防空转策略仅适用于Worker")
+			return
+		}
+		if err := req.ProgressPolicy.Validate(); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
 	}
 	profileChanged := false
 	if req.LLMProfileID != nil { // key present (数字 或 null)
@@ -426,6 +437,12 @@ func (s *Server) pgSaveAgentConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.LocalExec != nil {
 		if err := pg.SetAgentLocalExec(a.Key, *req.LocalExec); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.ProgressPolicy != nil {
+		if err := s.saveWorkerProgressPolicy(*req.ProgressPolicy); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -498,10 +515,16 @@ func (s *Server) pgGetAgent(w http.ResponseWriter, r *http.Request) {
 			"id": p.ID, "name": p.Name, "model": p.Model, "is_default": p.IsDefault,
 		})
 	}
+	wrapupTurns := a.WrapupMaxTurns
+	if wrapupTurns <= 0 {
+		wrapupTurns = agent.WrapupTurnsDefault(a.Key)
+	}
 	writeJSON(w, 200, map[string]any{
 		"agent": agentDTO(a), "prompt": cur, "variables": vars, "versions": vers,
-		"visibility":   map[string]any{"mcp": mcp, "skill": sk},
-		"llm_profiles": llmProfiles, // 可绑定的 LLM 配置候选
+		"visibility":      map[string]any{"mcp": mcp, "skill": sk},
+		"llm_profiles":    llmProfiles, // 可绑定的 LLM 配置候选
+		"progress_policy": s.workerProgressPolicy(),
+		"runtime_limits":  runtimeLimits(a.RunSecs, wrapupTurns, a.WrapupMaxTurns > 0),
 
 		"wrapup_prompt":            a.WrapupPrompt,                  // 已保存的收尾提示词(空=用内置默认)
 		"wrapup_default":           agent.WrapupDefault(a.Key),      // 内置默认(供占位/恢复默认)

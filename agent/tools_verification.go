@@ -69,6 +69,7 @@ func (t *ToolSet) recordVerification() actool.CoreTool {
 			"expected_revision":     idp("首次可省略/0；修改已有记录必须传最新revision，相同内容重试保持幂等"),
 			"change_reason":         str("改变已有证实或阴性结论时解释原因；旧证据继续保留"),
 			"observed_at":           str("可选RFC3339观察时间；仅刷新时间不新增修订或刷新进展"),
+			"repair_of":             str("仅修正原target缺失或格式错误时，填宿主保存核对提示中的invalid:失败编号；成功保存后关联核销该失败，已有target字段必须保持一致"),
 		}, "target", "state", "summary")),
 		func(ctx context.Context, input json.RawMessage) (actool.Result, error) {
 			var in db.VerificationUpdate

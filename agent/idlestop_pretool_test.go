@@ -184,15 +184,15 @@ func TestIdleStopRealHarnessAllowsChangingOutputWithoutFacts(t *testing.T) {
 	})
 	p := plannerStateProvider{complete: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
-		if calls <= 20 {
+		if calls <= 48 {
 			return idleToolCall(calls, "Probe", "{}")
 		}
 		return idleAssistantText("合成验证结束"), "end_turn", llm.Usage{}, nil
 	}}
 	_, reason, err := captureRun(ctx, agentcore.Options{Provider: p, NonStreaming: true, Hooks: h,
-		Tools: []actool.CoreTool{probe}, PermissionMode: permission.ModeBypass, WorkingDir: t.TempDir(), MaxTurns: 30}, "本地验证", nil)
+		Tools: []actool.CoreTool{probe}, PermissionMode: permission.ModeBypass, WorkingDir: t.TempDir(), MaxTurns: 60}, "本地验证", nil)
 	reason, err = workerIdleOutcome(t.Context(), ctx, h, reason, err)
-	if err != nil || reason != harness.ReasonCompleted || actual != 20 || writes.get().Total() != 0 {
+	if err != nil || reason != harness.ReasonCompleted || actual != 48 || writes.get().Total() != 0 {
 		t.Fatalf("长验证被写回节奏误杀：reason=%s err=%v calls=%d writes=%+v", reason, err, actual, writes.get())
 	}
 }

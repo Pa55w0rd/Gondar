@@ -317,6 +317,12 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 			if len(row.Schema) > 0 {
 				_ = json.Unmarshal(row.Schema, &schema)
 			}
+			if row.System && row.Kind == "builtin" {
+				// A stale startup flag, an older UI tab or a failed catalog write
+				// must not hide fields required by the current handler. User
+				// annotations remain editable; executable structure comes from code.
+				schema = agent.ReconcileToolSchema(t.InputSchema(), schema)
+			}
 			return meterTool(agent.DecorateTool(t, row.Description, schema), pg, row.Key, agentKey, runInfo)
 		}
 		out := tools[:0:0]

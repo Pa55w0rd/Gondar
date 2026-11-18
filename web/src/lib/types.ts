@@ -1395,6 +1395,13 @@ export interface AgentDetail {
   task_timeout_wrapup_default?: string;
   task_timeout_wrapup_max_turns?: number;
   task_timeout_wrapup_max_turns_default?: number;
+  progress_policy?: { save_reminder_seconds: number; idle_rounds: number; idle_seconds: number };
+  runtime_limits?: {
+    run_seconds: number; run_source: string;
+    model_call_seconds: number; model_call_source: string;
+    wrapup_turns: number; wrapup_source: string;
+    task_timeout_note: string; tool_timeout_note: string;
+  };
 }
 
 // ---- MCP ----

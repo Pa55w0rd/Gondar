@@ -51,7 +51,10 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
   const [skillVisible, setSkillVisible] = React.useState<string[]>([]);
   const [preview, setPreview] = React.useState("");
   const [maxTurns, setMaxTurns] = React.useState("0");
-  const [runSecs, setRunSecs] = React.useState("600");
+  const [runSecs, setRunSecs] = React.useState("1200");
+  const [saveReminder, setSaveReminder] = React.useState("900");
+  const [idleRounds, setIdleRounds] = React.useState("8");
+  const [idleSeconds, setIdleSeconds] = React.useState("180");
   // "" = 跟随(未绑定)；否则为 profile id 字符串
   const [llmProfileId, setLlmProfileId] = React.useState("");
   const [llmProfiles, setLlmProfiles] = React.useState<NonNullable<AgentDetail["llm_profiles"]>>([]);
@@ -91,7 +94,10 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         setMcpVisible(d.visibility?.mcp ?? []);
         setSkillVisible(d.visibility?.skill ?? []);
         setMaxTurns(String(d.agent?.max_turns ?? 0));
-        setRunSecs(String(d.agent?.run_seconds ?? 600));
+        setRunSecs(String(d.agent?.run_seconds ?? 1200));
+        setSaveReminder(String(d.progress_policy?.save_reminder_seconds ?? 900));
+        setIdleRounds(String(d.progress_policy?.idle_rounds ?? 8));
+        setIdleSeconds(String(d.progress_policy?.idle_seconds ?? 180));
         setLlmProfileId(d.agent?.llm_profile_id != null ? String(d.agent.llm_profile_id) : "");
         setLlmProfiles(d.llm_profiles ?? []);
         setWebSearch(!!d.agent?.web_search);
@@ -189,11 +195,19 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
         patch.max_turns = Math.max(0, Math.floor(Number(maxTurns) || 0));
         patch.run_seconds = Math.max(0, Math.floor(Number(runSecs) || 0));
       }
+      if (agentKey === "worker") {
+        const values = [saveReminder, idleRounds, idleSeconds].map((v) => Number(v));
+        if (values.some((v) => !Number.isSafeInteger(v)) || values[0] < 0 || values[1] < 1 || values[2] < 1) {
+          toast.error("保存提醒须为非负整数；防空转次数与观察时间须为正整数");
+          return;
+        }
+        patch.progress_policy = { save_reminder_seconds: values[0], idle_rounds: values[1], idle_seconds: values[2] };
+      }
       if (showWebSearch) patch.web_search = webSearch;
       if (showInteractiveShell) patch.interactive_shell = interactiveShell;
       if (showLocalExec) patch.local_exec = localExec;
       await api.saveAgentConfig(agentKey, patch);
-      toast.success("已保存运行配置（立即生效）");
+      toast.success("已保存运行配置（下一轮执行生效）");
       reload();
     } catch (e) {
       toast.error(`保存失败：${(e as Error).message}`);
@@ -324,7 +338,7 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                       <Label htmlFor="run-seconds" className="text-xs">{agentKey === "planner" ? "主探索时长（秒，0=不限）" : "运行时长（秒，0=不限）"}</Label>
                       <Input id="run-seconds" type="number" min={0} className="h-8 w-32"
                         value={runSecs} onChange={(e) => setRunSecs(e.target.value)} />
-                      {agentKey === "planner" && <span className="max-w-xs text-muted-foreground text-xs">按配置执行，另有最多 60 秒收尾。0 不限制主探索总时长，但单次模型调用仍有 10 分钟保护。</span>}
+                      <span className="max-w-xs text-muted-foreground text-xs">任务总时限单独生效；0 不限制本轮主探索，单次模型调用仍保留故障保护。</span>
                     </div>
                   </>
                 )}
@@ -332,6 +346,34 @@ export function AgentEditor({ agentKey, onSaved }: { agentKey: string; onSaved?:
                   <SaveIcon /> 保存配置
                 </Button>
               </div>
+              {agentKey === "worker" && (
+                <div className="grid gap-3 border-t pt-3">
+                  <p className="text-xs text-muted-foreground">保存提醒不暂停、不拦工具。防空转同时检查连续无实质进展的调用次数和持续时间，已有材料仍可读取和保存。</p>
+                  <div className="flex flex-wrap gap-3">
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="save-reminder" className="text-xs">保存提醒间隔（秒，0=关闭提醒）</Label>
+                      <Input id="save-reminder" type="number" min={0} className="h-8 w-32" value={saveReminder} onChange={(e) => setSaveReminder(e.target.value)} />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="idle-rounds" className="text-xs">连续无进展调用次数</Label>
+                      <Input id="idle-rounds" type="number" min={1} className="h-8 w-32" value={idleRounds} onChange={(e) => setIdleRounds(e.target.value)} />
+                    </div>
+                    <div className="grid gap-1.5">
+                      <Label htmlFor="idle-seconds" className="text-xs">无进展观察时间（秒）</Label>
+                      <Input id="idle-seconds" type="number" min={1} className="h-8 w-32" value={idleSeconds} onChange={(e) => setIdleSeconds(e.target.value)} />
+                    </div>
+                  </div>
+                </div>
+              )}
+              {showConfig && detail?.runtime_limits && (
+                <div className="grid gap-1 rounded-md border p-3 text-xs text-muted-foreground">
+                  <span>已保存的本轮预算：{detail.runtime_limits.run_seconds > 0 ? `${detail.runtime_limits.run_seconds} 秒` : "不限时"}（{detail.runtime_limits.run_source}）</span>
+                  <span>单次模型调用：最多 {detail.runtime_limits.model_call_seconds} 秒（{detail.runtime_limits.model_call_source}）</span>
+                  <span>收尾预算：{detail.runtime_limits.wrapup_turns} 轮（{detail.runtime_limits.wrapup_source}）</span>
+                  <span>{detail.runtime_limits.task_timeout_note}</span>
+                  <span>{detail.runtime_limits.tool_timeout_note}</span>
+                </div>
+              )}
               {showWebSearch && (
                 <div className="flex items-center gap-3 border-t pt-3">
                   <Switch

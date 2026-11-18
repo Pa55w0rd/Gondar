@@ -7,6 +7,7 @@ import (
 
 	actool "github.com/Autumn-27/norma/tool"
 	"gondar/db"
+	"gondar/filepreview"
 )
 
 type provenanceRecorderFixture struct{ taskID, intentID, calls int64 }
@@ -14,6 +15,46 @@ type provenanceRecorderFixture struct{ taskID, intentID, calls int64 }
 func (f *provenanceRecorderFixture) RecordArtifact(taskID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, error) {
 	f.calls++
 	return &db.TaskArtifact{ID: 1}, nil
+}
+
+type previewProvenanceFixture struct {
+	provenanceRecorderFixture
+	previewTask, previewID int64
+	entry                  string
+}
+
+func (f *previewProvenanceFixture) PreviewArtifactContent(taskID, artifactID int64, entry string) (*filepreview.Preview, error) {
+	f.previewTask, f.previewID, f.entry = taskID, artifactID, entry
+	return &filepreview.Preview{Format: "text", Text: "inert synthetic evidence", Truncated: true}, nil
+}
+
+func TestIntentArtifactWrapperPreservesPreviewCapabilityAndTaskBoundary(t *testing.T) {
+	host := &previewProvenanceFixture{}
+	recorder := artifactRecorderForIntent(host, 7, 11)
+	previewer, ok := recorder.(ArtifactPreviewer)
+	if !ok {
+		t.Fatal("worker wrapper hid host preview capability")
+	}
+	view, err := previewer.PreviewArtifactContent(7, 19, "proof.txt")
+	if err != nil || !view.Truncated || host.previewTask != 7 || host.previewID != 19 || host.entry != "proof.txt" {
+		t.Fatalf("preview not delegated intact: %+v %+v %v", view, host, err)
+	}
+	if _, err := previewer.PreviewArtifactContent(8, 99, "foreign.txt"); err == nil || host.previewID != 19 {
+		t.Fatal("cross-task preview reached host")
+	}
+	if _, ok := artifactRecorderForIntent(&provenanceRecorderFixture{}, 7, 11).(ArtifactPreviewer); ok {
+		t.Fatal("unsupported preview capability invented")
+	}
+	ts := NewToolSet(nil, "fixture")
+	ts.SetTaskID(7)
+	ts.SetArtifactRecorder(recorder)
+	result, err := ts.previewEvidence().Call(t.Context(), json.RawMessage(`{"artifact_id":19,"entry":"proof.txt"}`), nil)
+	if err != nil || result.IsError {
+		t.Fatalf("worker preview still unavailable: %+v %v", result, err)
+	}
+	if _, ok := recorder.(ArtifactProgressRecorder); !ok {
+		t.Fatal("preview wrapper dropped progress receipt capability")
+	}
 }
 func (f *provenanceRecorderFixture) RecordArtifactForIntent(taskID, intentID, findingID int64, runDir, relPath, name, kind, sourceURL, note string) (*db.TaskArtifact, error) {
 	f.calls++

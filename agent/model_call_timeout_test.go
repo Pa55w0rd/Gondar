@@ -190,6 +190,17 @@ func TestModelCallDeadlineUsesParentTaskAndRun(t *testing.T) {
 	}
 }
 
+func TestUnlimitedRunTaskDurationCannotExpandModelCallFallback(t *testing.T) {
+	ctx := withModelCallLimit(WithTaskClock(t.Context(), TaskClock{DeadlineUnix: time.Now().Add(time.Hour).Unix()}), 0)
+	// captureRun receives the derived task duration, not an explicit user limit.
+	ctx = withModelCallLimit(ctx, time.Hour)
+	_, cancel, limit := modelCallContext(ctx, defaultModelCallTimeout)
+	defer cancel()
+	if limit > defaultModelCallTimeout || limit < defaultModelCallTimeout-time.Second {
+		t.Fatalf("derived run duration expanded call protection: %v", limit)
+	}
+}
+
 func TestModelCallConfiguredBudgetReplacesFallback(t *testing.T) {
 	for _, budget := range []time.Duration{30 * time.Second, 20 * time.Minute, time.Hour} {
 		ctx := withModelCallLimit(t.Context(), budget)

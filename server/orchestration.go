@@ -524,42 +524,25 @@ func (s *Server) seedOrchestrationTools() {
 	// pentest 一起 seed 好了（项目尚无旧库，不做迁移）。
 }
 
-// refreshBuiltinToolSchemas propagates code schema/description changes on the
-// orchestration + platform tools into already-seeded rows ONCE per version flag —
-// SeedTool is first-insert-only, so a new param (e.g. spawn_task 的 llm_profile) never
-// reaches an old DB otherwise. Preserves each tool's agent binding + enabled flag.
-// Bump the flag whenever these tools' schemas/descriptions change in code.
+// Check orchestration/platform contracts on every startup, using the same
+// annotation-preserving reconciliation as domain tools. Old one-shot migration
+// flags cannot hide new fields or cause user descriptions/defaults to be reset.
 func (s *Server) refreshBuiltinToolSchemas() {
-	const flag = "tool_schema_refresh_v9_findings_pagination"
-	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
-		return
-	}
 	tools := append(s.orchestrationTools(), s.platformTools()...)
+	seeds := make([]agent.ToolSeed, 0, len(tools))
 	for _, t := range tools {
-		schema, _ := json.Marshal(t.InputSchema())
-		if err := s.m.pg.RefreshToolDefaults(t.Name(), t.Description(), schema); err != nil {
-			log.Printf("[tools] refresh %s schema failed: %v", t.Name(), err)
-		}
+		seeds = append(seeds, agent.ToolSeed{Key: t.Name(), Desc: t.Description(), Schema: t.InputSchema()})
 	}
-	// 同时把部分内置 agent 工具刷成代码默认：
-	//   - goal_met：旧库 seed 的描述带“结束本轮规划”的误导，会让 planner 把它当成
-	//     “结束空轮”的手段、刚开跑就误判整个任务完成。
-	//   - insert_assets：新增 related 入参(标记资产是否与当前任务相关、决定是否入覆盖度)，
-	//     SeedTool 首插入only，旧库已 seed 的 schema 否则收不到这个新参数。
-	//   - list_facts：改为分页，新增 limit/before/q 入参；旧库已 seed 的空 schema 否则
-	//     在工具管理页显示「无参数」，模型也拿不到这几个参数说明。
+	// Keep compatibility with callers that seed these domain tools separately.
 	refreshBuiltin := map[string]bool{"goal_met": true, "prove_goal": true, "insert_assets": true, "list_facts": true}
 	for _, sd := range agent.BuiltinToolSeeds() {
-		if !refreshBuiltin[sd.Key] {
-			continue
-		}
-		schema, _ := json.Marshal(sd.Schema)
-		if err := s.m.pg.RefreshToolDefaults(sd.Key, sd.Desc, schema); err != nil {
-			log.Printf("[tools] refresh %s desc failed: %v", sd.Key, err)
+		if refreshBuiltin[sd.Key] {
+			seeds = append(seeds, sd)
 		}
 	}
-	_ = s.m.pg.SetSetting(flag, "true")
-	log.Printf("[tools] 已刷新 orchestration/platform 工具 schema 到代码默认(一次性)")
+	if err := refreshCodeToolContracts(s.m.pg, seeds); err != nil {
+		log.Printf("[tools] orchestration/platform工具契约核对失败: %v", err)
+	}
 }
 
 // reseedGoalsPrompt 把 goals 目标拆解器的提示词刷成【当前代码默认】——因为默认正文新增了

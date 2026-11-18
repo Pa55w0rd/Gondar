@@ -31,13 +31,14 @@ type modelCallLimitKey struct{}
 // A run's configured budget supplies the single model call limit as well. This is not a
 // second absolute run timer: the SDK still owns its run clock and settlement.
 func withModelCallLimit(ctx context.Context, limit time.Duration) context.Context {
-	if limit <= 0 {
-		return ctx
+	if previous, ok := ctx.Value(modelCallLimitKey{}).(time.Duration); ok {
+		// Unlimited exploration retains the provider's own call protection.
+		// Derived task duration must not expand it, including custom call limits.
+		if previous <= 0 || limit <= 0 || previous < limit {
+			return ctx
+		}
 	}
-	if previous, ok := ctx.Value(modelCallLimitKey{}).(time.Duration); ok && previous > 0 && previous < limit {
-		limit = previous
-	}
-	return context.WithValue(ctx, modelCallLimitKey{}, limit)
+	return context.WithValue(ctx, modelCallLimitKey{}, max(time.Duration(0), limit))
 }
 
 type modelCallTimeoutProvider struct {

@@ -55,6 +55,17 @@ func (l *loop) execOneInvocation(use llm.ContentBlock, emitProgress func(tool.Pr
 	input := use.Input
 	originalDigest := inputDigest(input)
 	call.InputFacts(originalDigest, originalDigest, nil)
+	effectiveName := use.Name
+	if use.Name == tool.ExecuteExtraToolName {
+		var err error
+		t, input, err = l.resolveDeferredInvocation(ctx, t, input)
+		if err != nil {
+			return llm.ToolResultText(use.ID, "Error: "+err.Error(), true), nil, outcome
+		}
+		effectiveName = t.Name()
+		call.ResolveTool(effectiveName)
+		call.InputFacts(originalDigest, inputDigest(input), nil)
+	}
 
 	// Schema validation (FR-04.5).
 	//
@@ -70,7 +81,7 @@ func (l *loop) execOneInvocation(use llm.ContentBlock, emitProgress func(tool.Pr
 			if !json.Valid(input) {
 				validateErr = fmt.Errorf("input is not complete JSON")
 			} else if validateErr != nil {
-				if corrected, paths := normalizer(ctx, use.Name, t.InputSchema(), input); len(corrected) > 0 && len(paths) > 0 && json.Valid(corrected) && tool.ValidateInput(t.InputSchema(), corrected) == nil {
+				if corrected, paths := normalizer(ctx, effectiveName, t.InputSchema(), input); len(corrected) > 0 && len(paths) > 0 && json.Valid(corrected) && tool.ValidateInput(t.InputSchema(), corrected) == nil {
 					input, validateErr = corrected, nil
 					call.InputFacts(originalDigest, inputDigest(input), paths)
 				}
@@ -82,24 +93,7 @@ func (l *loop) execOneInvocation(use llm.ContentBlock, emitProgress func(tool.Pr
 		}
 	}
 
-	mode := l.in.PermissionMode
-	if l.in.PermissionModeFunc != nil {
-		mode = l.in.PermissionModeFunc()
-	}
-	pc := permission.Context{
-		Mode:       mode,
-		WorkingDir: l.in.WorkingDir,
-		Allowed:    l.in.Allowed,
-		Disallowed: l.in.Disallowed,
-	}
-	dec := permission.Evaluate(ctx, permission.Request{
-		ToolName:     use.Name,
-		Input:        input,
-		IsReadOnly:   t.IsReadOnly(input),
-		ToolDecision: t.CheckPermissions(ctx, input, pc),
-		Ctx:          pc,
-		Ask:          l.in.CanUseTool,
-	})
+	dec := l.evaluateToolPermission(ctx, t, effectiveName, input)
 	if dec.Behavior != permission.Allow {
 		toolcall.Mark(ctx, toolcall.PermissionDenied, toolcall.NotExecuted, "permission", "permission_denied", 0)
 		msg := dec.Message
@@ -115,7 +109,7 @@ func (l *loop) execOneInvocation(use llm.ContentBlock, emitProgress func(tool.Pr
 
 	// Pre-tool hook.
 	if l.in.Hooks != nil {
-		if block, msg, updated := l.in.Hooks.PreToolUse(ctx, use.Name, input); block {
+		if block, msg, updated := l.in.Hooks.PreToolUse(ctx, effectiveName, input); block {
 			toolcall.MarkDefault(ctx, toolcall.HookPrevented, toolcall.NotExecuted, "hook", "hook_prevented")
 			return llm.ToolResultText(use.ID, "Blocked by hook: "+msg, true), nil, outcome
 		} else if len(updated) > 0 {
@@ -159,7 +153,7 @@ func (l *loop) execOneInvocation(use llm.ContentBlock, emitProgress func(tool.Pr
 
 	if l.in.Hooks != nil {
 		raw, _ := json.Marshal(res.Flatten())
-		l.in.Hooks.PostToolUse(ctx, use.Name, input, raw, res.IsError)
+		l.in.Hooks.PostToolUse(ctx, effectiveName, input, raw, res.IsError)
 	}
 
 	content := res.Content

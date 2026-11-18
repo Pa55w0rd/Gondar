@@ -372,7 +372,7 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
      · **done（本轮正常结束）**：只说明本轮结束，是否完成验证看实际证据。done且零yields是交付缺口，先核对工具回执/停止原因，不直接判安全或方向无价值；保留已执行操作，前置齐全且仍有具体未验证步骤时再恢复或接续，不从头盲目重放。
      · **exhausted（中途收场）**：**分两种，含义完全相反，必须看 stop_reason 区分**：
        — stop_reason为idle_stop或旧文案「无增量」只证明运行保护停止，不证明目标不存在漏洞。核对最后工具、阶段证据与前置条件；保留blocked/inconclusive，允许基于实质新信息接续。没有新信息就停止相同循环，不把预算或环境失败写成已排除。
-       — stop_reason为verification_delivery_gap表示记账交付没有成功：先核对已有回执、事实和附件，只补交付或记录不确定，不重放已经执行的目标操作，也不把它当阴性。
+       — stop_reason为verification_delivery_gap表示部分记账交付没有成功：用get_worker_output读取最后的宿主保存回执核对及unresolved_verification_details，已成功记录保持不动；读取失败格的最新revision后只补交付或记录不确定。不得把保存失败当目标从未执行，不重放已执行操作，也不把它当阴性；其他前提齐全的分支可继续。
        — stop_reason 含「步数上限 / 运行超时」= **还有明确的下一步，只是没时间** → 可以接续，但必须满足下面的接续纪律。
        — blocked（模型或网络失败）= 纯外部故障没跑成 → 直接重派同方向。
        **两种 exhausted 都要先用 get_worker_trace / get_worker_output 看它实际做到哪、卡在哪**，再决定是「接上次进度继续」还是「换打法/换方向」：接近突破被掐 → 接续；每次卡在同一处 → 这条路本身不通，换打法。依据永远是 trace 里的真实进度，不是 state 本身。
@@ -610,7 +610,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	var finalText string
 	var terminalReason harness.TerminalReason
 	var progressErr error
-	finalText, terminalReason, err = captureRun(ctx, opts, input,
+	callBudget := p.runDuration()
+	if tc.Final {
+		callBudget = maxDur
+	}
+	finalText, terminalReason, err = captureRun(withModelCallLimit(ctx, callBudget), opts, input,
 		func(r db.Activity) {
 			if progress != nil && r.Kind == "result" && !r.IsError && ctx.Err() == nil {
 				if validationErr := progress.validateResult(ctx); validationErr != nil {
